@@ -1,27 +1,29 @@
-# --- runtime state, created on demand and specific to one setup -------------
-muted.json           # which bands you have unticked
-bookmarks.json       # your starred channels and notes
-spurs.json           # spurs measured on YOUR dongle — not portable
+# NOTE: git does not support trailing comments on a pattern line. A comment
+# must be on its own line, or it becomes part of the pattern and silently
+# matches nothing. That mistake tracked three state files here once already.
+
+# Runtime state: created on demand, specific to one setup and one location.
+muted.json
+bookmarks.json
+spurs.json
 cal.json
 
-# --- recordings -------------------------------------------------------------
-# These are audio of real people on the air. They are also large. Keep them
-# local.
+# Recordings. These are audio of real people on the air, and they are large.
 *.wav
 clips/
 night/
 stakeout/
 recordings/
 
-# --- models -----------------------------------------------------------------
+# Whisper models
 models/
 *.bin
 
-# --- python -----------------------------------------------------------------
+# Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
 
-# --- os ---------------------------------------------------------------------
+# OS
 .DS_Store
