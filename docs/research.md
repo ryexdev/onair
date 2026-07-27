@@ -1,4 +1,9 @@
-# Research rounds — agent findings, nothing implemented
+# What was tested, and what did not work
+
+A record of ideas that were measured and rejected, and of problems that are
+known and unfixed. It is here because a rejected idea with evidence behind it
+is worth more than an untested one that sounds good — and because several of
+these look obviously correct until you measure them.
 
 Bar for "worth it": the last real find was prove.channelize() recomputing a
 2.88M-point FFT once per channel instead of once per capture — 23x, output
@@ -68,7 +73,7 @@ notched — the harness was wrong, not the code. Corrected below.)
    round-1 prior-art finding that we should measure occupied bandwidth FIRST.
 
 4. **CW reads as voice** (synthetic keyed CW -> voice, syllabic 25.1). Arrived
-   at from synthesis alone, and it matches exactly what the user's ear found
+   at from synthesis alone, and it matches exactly what a human ear found
    on the 146.7000 morse clips the same morning. Two unrelated methods, same
    conclusion. AM airband voice is unstable (voice 1 of 3 trials, data 2).
    Weak SSB -> quiet on the presence floor.
@@ -300,7 +305,7 @@ degrades.
 **Top finding, VERIFIED BY ME: unplugging the dongle kills the process.**
 scan.py:1605 `iq = r.read(n_samp)` has no try; rtl.py raises RuntimeError; the
 only handler (scan.py:1746) catches KeyboardInterrupt. Process exits with a
-traceback, no reconnect logic exists anywhere, whole board lost. The user WILL
+traceback, no reconnect logic exists anywhere, whole board lost. you will
 unplug it. Smallest fix: catch RuntimeError per step, and after N consecutive
 failures re-run rtl.find("R828D") and rebuild Rtl every 2 s. State survives.
 
@@ -426,7 +431,7 @@ MISLEADING (all four VERIFIED BY ME on the live board, 905 rows):
    oldest still-badged voice is 447.3875 at **2655 s = 44 minutes**, visually
    identical to one confirmed 5 s ago. Note this EXCEEDS VERDICT_HOLD_S=600 —
    the hold governs overwriting, not display, so a verdict shows indefinitely
-   if the channel is never re-verified. Most likely single cause of the user
+   if the channel is never re-verified. Most likely single cause of the operator
    listening to a dead channel.
 4. **228 of 905 rows are LIVE and "quiet" at the same time** — green for "in
    use" while the column says nothing is there. Failure-to-measure dressed as
@@ -438,7 +443,7 @@ MISLEADING (all four VERIFIED BY ME on the live board, 905 rows):
 HIDDEN BUT KNOWN (would change the next click):
   * Tracker holds laps/first/last/first_lap/last_lap and publish() emits NONE.
     Band mode already shows count/airtime/longest — the "40 x 2 s vs 1 x 80 s"
-    distinction — but only AFTER the user commits to clicking in.
+    distinction — but only AFTER you commit to clicking in.
   * Repeater vs simplex is computable today with no new measurement: the live
     board contains 4 distinct 2 m +/-600 kHz pairs (146.6125/147.2125,
     147.2375/147.8375, 147.725/148.325, 144.075/144.675) and nothing flags them.
@@ -506,7 +511,7 @@ Ranked flags, VERIFIED BY ME where marked:
    compared to a FIXED threshold, so dyn >= 0.70 is not the same test in
    prove.py (SECS=10) as in the sweep (1.2 s) as in band mode (concatenated
    non-contiguous audio). prove.py systematically says DATA more often than
-   the board on the same signal — and prove.py is the tool the user reaches
+   the board on the same signal — and prove.py is the tool the operator reaches
    for to adjudicate a disagreement.
 4. Noise floor is ONE scalar over 1.92 MHz. Median is the right estimator and
    median-of-dB == dB-of-median, so that part is clean — but the IF response

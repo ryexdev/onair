@@ -92,8 +92,6 @@ Each needs the radio to itself, so stop `scan.py` first.
 ```
 python3 tools/meter.py 162.5500     live signal meter, 8 updates/sec, for aiming an antenna
 python3 tools/stakeout.py 147.4350  park on one channel, save every transmission
-python3 tools/band.py 144 148       standalone band monitor
-python3 tools/watch.py 146.52       park on a channel until it transmits
 python3 tools/label.py grab         record clips, then `ui` to label them by ear
 python3 tools/review.py stakeout    listen to clips and label them one by one
 python3 tools/transcribe.py stakeout   whisper-label a directory of recordings (offline)
@@ -123,7 +121,34 @@ characterised.
 **Band labels are US allocations.** Display only — nothing in the detector
 reads them.
 
-`docs/` has the working notes, including measured evidence for every threshold
+
+**Two more things that are known and unfixed.** About twenty weak signals
+across 50–54 MHz are detected but unidentified — tested and ruled out: a
+regular comb (no grid fits) and a pure tone (energy is spread, not
+concentrated). They are real and reproducible across tuner centres; their
+origin is not known. And a strong nearby transmitter splatters the whole
+slice: 5 W at arm's length manufactured 31 phantom `data` channels, all
+starting and stopping in the same instant. Not guarded against.
+
+## How any of this was checked
+
+Detection was verified four ways that do not depend on each other: signals
+vanish when the antenna is disconnected; a controlled transmission on 146.520
+was found at exactly 146.5200; ADS-B measures a 56.7 µs median burst against a
+56 µs spec the code knows nothing about; and P25 at 858.2125 reads a 4800 Hz
+symbol clock on four consecutive runs.
+
+Voice was checked against a human ear and against whisper transcribing actual
+words — including a GMRS conversation where the callsign in the transcript
+matched the licence format for that service. Those two ground truths disagree
+often enough to be worth keeping separate: whisper is a reliable positive and
+an unreliable negative, since it misses quiet speech but does not invent it
+above about 14 dB.
+
+Frequency accuracy, against transmitters on exactly known channels: NOAA
+162.5500 reads 162.5498, and 147.0000 reads 146.9998.
+
+`docs/research.md` records the rest: measured evidence behind every threshold,
 and a long list of things that were tried and did not work.
 
 ## A note on method
