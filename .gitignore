@@ -1,0 +1,27 @@
+# --- runtime state, created on demand and specific to one setup -------------
+muted.json           # which bands you have unticked
+bookmarks.json       # your starred channels and notes
+spurs.json           # spurs measured on YOUR dongle — not portable
+cal.json
+
+# --- recordings -------------------------------------------------------------
+# These are audio of real people on the air. They are also large. Keep them
+# local.
+*.wav
+clips/
+night/
+stakeout/
+recordings/
+
+# --- models -----------------------------------------------------------------
+models/
+*.bin
+
+# --- python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- os ---------------------------------------------------------------------
+.DS_Store
