@@ -1546,6 +1546,41 @@ function age_col(s){
   return 'rgb('+r+','+g+','+b+')';
 }
 function snr_w(s){return Math.min(100,Math.max(4,s/35*100))}
+// ONE handler on the container, not one per row.
+//
+// The table is rebuilt roughly twice a second and has ~1000 rows, so handlers
+// bound to individual <span>s are destroyed and recreated constantly. If a
+// rebuild lands between mouse-down and mouse-up the element you pressed no
+// longer exists and the click is silently lost — which is why starring a
+// channel sometimes appeared to do nothing. The container is never replaced,
+// so a delegated handler cannot be lost this way.
+var tableWired=false;
+function wireTable(){
+  if(tableWired) return;
+  var out=document.getElementById('out');
+  if(!out) return;
+  tableWired=true;
+  out.addEventListener('click',function(e){
+    var s=e.target.closest && e.target.closest('.star');
+    if(!s) return;
+    e.preventDefault(); e.stopPropagation();
+    var on=!s.classList.contains('on');
+    s.classList.toggle('on', on);
+    var tr=s.closest('tr'); if(tr) tr.classList.toggle('fav', on);
+    fetch('/fav?f='+s.dataset.f+'&on='+(on?1:0));
+    fsig='';                        // rebuild so pinning takes effect
+  });
+  out.addEventListener('change',function(e){
+    var n=e.target.closest && e.target.closest('.note');
+    if(!n) return;
+    fetch('/fav?f='+n.dataset.f+'&note='+encodeURIComponent(n.value));
+  });
+  out.addEventListener('focusout',function(e){
+    var n=e.target.closest && e.target.closest('.note');
+    if(!n) return;
+    fetch('/fav?f='+n.dataset.f+'&note='+encodeURIComponent(n.value));
+  });
+}
 function esc(t){return (t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 // A UV-5R-class Baofeng covers 136-174 and 400-520 MHz, FM only. Outside that
 // it refuses the entry outright — the "cancel" the user saw keying in 250.0125
@@ -1650,20 +1685,7 @@ async function tick(){
     (pre.length?'every row is filtered out \u2014 use a column menu to bring them back'
               :'nothing confirmed yet\u2026')+'</td></tr>';
   setBody(h+'</tbody></table>');
-  document.querySelectorAll('.note').forEach(function(nEl){
-    nEl.onclick=function(e){e.stopPropagation();};
-    nEl.onchange=function(){
-      fetch('/fav?f='+nEl.dataset.f+'&note='+encodeURIComponent(nEl.value));};
-    nEl.onblur=nEl.onchange;});
-  document.querySelectorAll('.star').forEach(function(sEl){
-    sEl.onclick=function(e){
-      e.preventDefault(); e.stopPropagation();
-      var on=!sEl.classList.contains('on');
-      sEl.classList.toggle('on', on);
-      sEl.parentNode.parentNode.classList.toggle('fav', on);
-      fetch('/fav?f='+sEl.dataset.f+'&on='+(on?1:0));
-      fsig='';                      // force a rebuild so pinning takes effect
-    };});
+  wireTable();
   var hid=[];
   for(var c in HID) if(HID[c].size) hid.push(c+': '+[...HID[c]].join(', '));
   var fn=document.getElementById('fnote');
