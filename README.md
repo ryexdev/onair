@@ -59,8 +59,8 @@ separate them from speech at any threshold. Whisper can.
 
 - An RTL-SDR. Developed against an RTL-SDR Blog V4 (R828D tuner).
 - `librtlsdr` (`brew install librtlsdr`)
-- Python 3 and numpy. That is the whole dependency list — no scipy, no torch,
-  no GNU Radio.
+- Python 3 and numpy (`pip install -r requirements.txt`). That is the whole
+  dependency list — no scipy, no torch, no GNU Radio.
 - Optional: [whisper.cpp](https://github.com/ggerganov/whisper.cpp) and a model,
   for speech confirmation.
 
@@ -172,6 +172,15 @@ Frequency accuracy, against transmitters on exactly known channels: NOAA
 
 `docs/research.md` records the rest: measured evidence behind every threshold,
 and a long list of things that were tried and did not work.
+
+## A note on listening
+
+This receives; it does not transmit. Receiving is the normal use of a radio,
+but what you may then do with what you hear is not the same everywhere, and
+recordings of other people's conversations are worth treating with more care
+than a log file. The recording directories are gitignored for that reason.
+Amateur and marine traffic is public by design; a lot of what this finds is
+not amateur traffic.
 
 ## A note on method
 
