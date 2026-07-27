@@ -28,7 +28,7 @@ import os
 import sys
 import urllib.parse
 
-DIR = "stakeout"
+DIR = "stakeout"   # relative to where you run it
 PORT = 8705
 
 
@@ -38,6 +38,7 @@ def clips():
         names = json.load(open(lst))
     else:
         if not os.path.isdir(DIR):
+            print(f"no such directory: {DIR}")
             return []
         names = sorted(f for f in os.listdir(DIR) if f.endswith(".wav"))
     out = []

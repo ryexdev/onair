@@ -87,23 +87,40 @@ demand. None of them ship, and the scanner runs fine without them.
 
 ## Tools
 
-Each needs the radio to itself, so stop `scan.py` first.
+Most need the radio to themselves, so stop `scan.py` first. Run them from the
+repo root; they write to `clips/`, `stakeout/` and `night/` there regardless of
+where you invoke them from.
 
 ```
 python3 tools/meter.py 162.5500     live signal meter, 8 updates/sec, for aiming an antenna
 python3 tools/stakeout.py 147.4350  park on one channel, save every transmission
-python3 tools/label.py grab         record clips, then `ui` to label them by ear
+python3 tools/label.py grab 146.52 147.435
+                                    record clips, then `ui` to label them by ear
 python3 tools/review.py stakeout    listen to clips and label them one by one
 python3 tools/transcribe.py stakeout   whisper-label a directory of recordings (offline)
 python3 tools/evalset.py            grow a labelled evaluation set
+                                    (this one takes and returns the radio itself —
+                                     leave scan.py running)
 python3 prove.py 146.52             one channel, in detail
+
+python3 tools/tune.py noise         synthetic Gaussian — every hit is a false
+                                    positive by construction
+python3 tools/tune.py off           same, with the antenna unplugged, so real
+                                    hardware artefacts are included
+python3 tools/tune.py sweep         false positives vs detections across the
+                                    detection thresholds
+python3 tools/tune.py repeat        do the same channels reappear in a later
+                                    session? A coin-flip detector scores ~0%
 ```
 
 ## Known limits
 
 **HF below 24 MHz is unavailable.** The V4 can receive it — it has a built-in
-upconverter — but that path needs the rtlsdr-blog fork of librtlsdr, and
-Homebrew ships the osmocom one.
+upconverter and a triplexer splitting off HF 0–28 MHz — but that path needs the
+rtlsdr-blog fork of librtlsdr, and Homebrew ships the osmocom one. That is also
+why `pyrtlsdr` will not import against a Homebrew build: it wants
+`rtlsdr_set_dithering`, a symbol the osmocom version does not export. This
+project talks to the library through a small ctypes wrapper for that reason.
 
 **Local interference travels with the hardware.** Three clock combs are
 excluded: 28.8 MHz (the dongle's own reference), 12 MHz (USB) and 27 MHz. The
@@ -120,6 +137,11 @@ characterised.
 
 **Band labels are US allocations.** Display only — nothing in the detector
 reads them.
+
+**`digital` is far less verified than `voice`.** Voice has been checked against
+a human ear and against transcription many times over. The digital half rests
+on a handful of cases — a pager confirmed by ear, and P25 symbol clocks that
+reproduce across runs. Treat it as the weaker claim.
 
 
 **Two more things that are known and unfixed.** About twenty weak signals

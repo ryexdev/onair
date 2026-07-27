@@ -17,7 +17,8 @@ import http.server, json, sys, threading, time
 import numpy as np
 import os
 import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 import scan, rtl
 
 PORT = 8704

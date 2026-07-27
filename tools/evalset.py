@@ -18,12 +18,13 @@ its own opinion.
 """
 import json, os, random, re, subprocess, sys, urllib.request
 import numpy as np
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 import prove, scan, rtl
 
 WHISPER = os.environ.get("WHISPER_BIN", "/opt/homebrew/bin/whisper-cli")
 MODEL = os.environ.get("WHISPER_MODEL", "models/ggml-small.en.bin")
-STORE = "night/evalset.json"
+STORE = os.path.join(ROOT, "night", "evalset.json")
 SECS = 10.0
 NONSPEECH = re.compile(r"^[\s]*[\(\[\*].*[\)\]\*][\s]*$")
 
@@ -102,8 +103,9 @@ def main(argv):
                         "when": time.strftime("%H:%M")})
     finally:
         r.close()
-        subprocess.Popen(["python3", "-u", "scan.py", "full", "--web"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen([sys.executable, "-u", os.path.join(ROOT, "scan.py"),
+                          "full", "--web"],
+                         stdout=subprocess.DEVNULL)
 
     for g in got:
         try:

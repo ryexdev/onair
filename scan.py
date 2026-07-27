@@ -449,10 +449,16 @@ _BLANK = __import__("re").compile(r"blank_?audio|inaudible|silence|\u266a|\u266b
 # 4.7-11.1 dB. Not a fitted threshold - it is the presence floor classify()
 # already uses to decide a carrier exists at all, plus the same margin.
 LISTEN_MIN_PRES = 14.0
-# Word count stays where it was. These are short transmissions and a real one
-# is often four words; the hallucinations were four words too, so counting
-# words cannot tell them apart. Signal strength can.
-LISTEN_MIN_WORDS = 3
+# Two words, because a 1.2 s capture of real speech CONTAINS two to four words.
+# Measured directly on NOAA — a continuous, unambiguous voice transmission at
+# 34.3 dB presence — whisper returned "as well.", which a three-word minimum
+# threw away. Roughly half of genuine fragments were being discarded that way.
+#
+# Word count was never the defence. The hallucinations that prompted all this
+# ("We also have that", "So a lot of people") were four words and would have
+# passed any of these limits; what removes them is LISTEN_MIN_PRES, since they
+# all came from 4.7-11.1 dB. This threshold only exists to drop one-word noise.
+LISTEN_MIN_WORDS = 2
 
 heard = {}                    # freq_hz -> (when, text)
 heard_lock = threading.Lock()
@@ -474,15 +480,25 @@ def said_words(text):
     words = [w for w in re.findall(r"[A-Za-z']+", t) if len(w) > 1]
     if len(words) < LISTEN_MIN_WORDS:
         return False
-    # self-repeating output is the classic hallucination
-    return len(set(w.lower() for w in words)) > max(2, len(words) // 4)
+    # Self-repeating output is the classic hallucination ("you you you you").
+    # Test for REPETITION, not for a minimum vocabulary: the old rule demanded
+    # three distinct words no matter what, so a genuine two-word fragment like
+    # "as well." was rejected as if it were a loop.
+    uniq = len(set(w.lower() for w in words))
+    return uniq * 2 >= len(words)
+
+
+listen_stats = {"queued": 0, "dropped": 0, "gated": 0, "ran": 0}
 
 
 def queue_listen(freq_hz, audio, rate):
     """Called from the judging threads. Must be instant and must never raise."""
     try:
         with _wq_lock:
+            if len(_wq) >= WHISPER_QUEUE:
+                listen_stats["dropped"] += 1
             _wq.append((freq_hz, audio, rate))
+            listen_stats["queued"] += 1
     except Exception:
         pass
 
@@ -500,6 +516,7 @@ def whisper_worker():
             time.sleep(0.4)
             continue
         freq_hz, audio, rate = item
+        listen_stats["ran"] += 1
         try:
             wav(tmp, audio, rate)
             out = subprocess.run([WHISPER_BIN, "-m", WHISPER_MODEL, "-f", tmp,
@@ -774,6 +791,8 @@ def verify_slice(r, center_hz, freqs, pool):
                 pres = metrics(y, CHAN_RATE)[4]
                 if not np.isnan(pres) and pres >= LISTEN_MIN_PRES:
                     queue_listen(f, y, CHAN_RATE)
+                else:
+                    listen_stats["gated"] += 1
             return f, v
         except Exception:
             # Swallowing this hid a real crash for a long time: kind_of raised
@@ -1125,6 +1144,19 @@ def live_hold(blind_s):
     return max(blind_s + LIVE_MARGIN, LIVE_MIN_S)
 
 
+def apply_heard(rows):
+    """Upgrade rows that whisper transcribed real words on.
+
+    Kept separate from attach_bookmarks() because an earlier refactor of the
+    bookmark block silently deleted both call sites of this: the log filled
+    with confirmations while every row stayed unmarked.
+    """
+    for r in rows:
+        txt = heard_recently(r["freq"] * 1e6)
+        if txt:
+            r["verdict"], r["said"] = "voice", txt
+
+
 def attach_bookmarks(rows):
     """Flag bookmarked rows and return which bookmarks were matched.
 
@@ -1198,6 +1230,7 @@ def publish(tr, lap, t0, bands):
                      "verdict": m.get("verdict", "?"),
                      "kind": "+".join(sorted(m.get("kinds",
                                                     {m.get("kind","narrow")})))})
+    apply_heard(rows)
     seen = attach_bookmarks(rows)
     # A bookmark must stay on the board even when the channel is silent and its
     # track has expired — otherwise the thing you bookmarked disappears exactly
@@ -1878,6 +1911,7 @@ def publish_band(hist, live, centers, tag, lo, hi, t0):
              "age": round(now - s["last"], 1), "on": k in live,
              "kind": "", "pattern": "", "duty": 0}
             for k, s in hist.items()]
+    apply_heard(rows)
     seen = attach_bookmarks(rows)
     # A bookmark must stay on the board even when the channel is silent and its
     # track has expired — otherwise the thing you bookmarked disappears exactly
@@ -2164,6 +2198,8 @@ def main(argv):
                       f"  after {m['last']-m['first']:.0f}s")
             if lap % 20 == 0:
                 report(tr, lap, time.time() - t0)
+                if whisper_ok():
+                    print(f"  listen: {listen_stats}", flush=True)
                 print(f"  scheduler: {sched.hot_count()} hot steps of {steps}"
                       f"  (cold steps still checked 1 lap in {COLD_EVERY})")
     except KeyboardInterrupt:

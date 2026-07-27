@@ -3,7 +3,7 @@
 
     python3 label.py grab            record clips from what is on air now
     python3 label.py grab 146.52 ... record these specific channels
-    python3 label.py ui              listen and label them
+    python3 tools/label.py ui              listen and label them
                                      -> http://127.0.0.1:8703/
 
 Every threshold in this project was set by staring at signals nobody had
@@ -19,16 +19,17 @@ import json, os, struct, sys, time
 import numpy as np
 import os
 import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 import scan, rtl, prove
 
 # Which set of clips to label. `grab` always writes to clips/, but the UI can
 # be pointed at any directory holding wavs plus a clips.json manifest — the
 # stakeout recordings are the bigger set and were previously unreachable:
-#     python3 label.py ui stakeout
-CLIPS = "clips"
-META = "clips/clips.json"
-LABELS = "clips/labels.json"
+#     python3 tools/label.py ui stakeout
+CLIPS = os.path.join(ROOT, "clips")
+META = os.path.join(CLIPS, "clips.json")
+LABELS = os.path.join(CLIPS, "labels.json")
 
 
 def use_dir(d):
@@ -92,7 +93,7 @@ def grab(freqs):
     finally:
         r.close()
     json.dump(meta, open(META, "w"), indent=1)
-    print(f"\n{len(meta)} clips in {CLIPS}/  — now run: python3 label.py ui")
+    print(f"\n{len(meta)} clips in {CLIPS}/  — now run: python3 tools/label.py ui")
 
 
 PAGE = """<!doctype html><meta charset=utf-8><title>is this data?</title>
@@ -243,8 +244,9 @@ def auto(minutes=60, every=90):
             grab(pick)
         except Exception as e:
             print("  grab failed:", e)
-        subprocess.Popen(["python3", "-u", "scan.py", "full", "--web"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen([sys.executable, "-u", os.path.join(ROOT, "scan.py"),
+                          "full", "--web"],
+                         stdout=subprocess.DEVNULL)
         time.sleep(max(every - 30, 10))
 
 
@@ -279,7 +281,7 @@ def main(argv):
                         "tag": scan.label_for(freq), "when": m.group(3)})
         json.dump(out, open(f"{d}/clips.json", "w"), indent=1)
         print(f"{len(out)} clips -> {d}/clips.json")
-        print(f"now run: python3 label.py ui {d}")
+        print(f"now run: python3 tools/label.py ui {d}")
     elif cmd == "auto":
         auto(float(argv[2]) if len(argv) > 2 else 60)
     elif cmd == "grab":

@@ -540,6 +540,29 @@ total absence of dBm does not matter for "is anyone using this" — except for
 item 1, where a bare gain-table subtraction buys most of what absolute
 calibration would.
 
+## Open: a false `digital` that cannot be filtered out
+
+147.4375 reads `digital` while people are audibly talking on it. Diagnosed and
+deliberately not fixed.
+
+The false symbol clock sits at **4817 Hz**. P25's real symbol rate is
+**4800 Hz**. They are indistinguishable by frequency, so band-limiting or
+notching to kill the false positive would destroy genuine digital detection on
+a P25 channel. It needs a different discriminator, not a filter.
+
+The verdict is content-dependent: on that channel, four of six captures read
+`voice` and two read `digital`, and the flip tracked what was actually being
+transmitted — the `digital` reads happened while someone was playing periodic
+game sounds into the repeater. So the classifier is not malfunctioning. It is
+reporting a real periodic signal using a word that implies "machine data you
+cannot use", which is a taxonomy problem rather than a detection one.
+
+Related: the whole audio band above 3400 Hz is where this lives. The same six
+clips all read `voice` when judged from the written WAV files, because
+`prove.wav` filters to 300-3400 Hz before writing. Whatever fools the
+symbol-clock test sits above the speech band.
+
+
 ---
 
 ## Note on what is in the code and what is not

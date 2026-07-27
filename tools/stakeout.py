@@ -19,10 +19,11 @@ import json, os, sys, time
 import numpy as np
 import os
 import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 import scan, rtl, prove
 
-OUT = "stakeout"
+OUT = os.path.join(ROOT, "stakeout")
 BLOCK_S = 0.25
 HANG_S = 1.5
 MIN_S = 0.6              # ignore blips shorter than this
