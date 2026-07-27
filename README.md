@@ -4,8 +4,13 @@ Sweep the radio spectrum with an RTL-SDR, find every channel that is actually
 in use, and say what kind of thing is on it — **without decoding anything**.
 
 ```
+cd /path/to/onair
 python3 scan.py full --web     ->  http://127.0.0.1:8701/
 ```
+
+Run it from the repo directory. Your bookmarks, muted bands and measured spur
+list are read from there, so starting it anywhere else gives you a scanner
+that has forgotten all three.
 
 Most SDR software either draws you a power heatmap, or tunes a list of
 frequencies you already knew about. This does neither. It discovers channels it
