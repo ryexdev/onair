@@ -131,9 +131,10 @@ If a probe still fails afterwards, the order matters — the daemon enumerates
 on hotplug, so it must be running and clean *before* the device appears:
 
 1. unplug the RSP1B
-2. `sudo launchctl kickstart -k system/com.sdrplay.service`
-3. plug it back in
-4. probe
+2. `sudo killall -TERM sdrplay_apiService`
+3. wait ~5 s for KeepAlive to bring it back
+4. plug it back in
+5. probe
 
 ## Notes for when the port happens
 
