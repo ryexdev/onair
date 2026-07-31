@@ -184,3 +184,57 @@ SDRplay's to fix.
 One honest note on method: a dozen probe runs were made while diagnosing, each
 of which opens the API. If any leaked a claim, the debugging was contributing
 to the symptom. Probe once after a clean sequence, not repeatedly.
+
+## Root cause found: the firmware upload times out on endpoint 0
+
+After a reboot the daemon log changed character — `transfer error: timed out`
+instead of exclusive-access. Streaming the kernel log during one attempt
+(`/usr/bin/log stream`, and note `log` is a zsh builtin so the full path is
+required) produced the two lines that explain everything:
+
+    IOUSBHostDevice::setConfigurationGated: pid 1860, sdrplay_apiService
+        selected configuration 1
+    AppleUSBIORequest::complete: device 1 endpoint 0x00:
+        status 0xe00002d6 (timeout): 1920 bytes transferred
+
+The daemon opens the device and sets configuration fine, then the firmware
+upload — a control transfer on endpoint 0 — dies after 1920 bytes. The device
+stops responding mid-upload. Everything downstream (`GetDevices` count 0, the
+exclusive-access spam, the self-deadlock) is fallout from the daemon's broken
+error path after this one failure.
+
+The self-deadlock mechanism, confirmed by the kernel log naming the pid: the
+daemon's first failed attempt leaves the device claimed (libusb warns
+"application left some devices open"), the process keeps running, so every
+later attempt collides with its own zombie claim — reported misleadingly as
+"another process".
+
+## The libusb swap: fixed one layer, worth keeping
+
+The daemon bundles a years-old libusb and loads it via @rpath. Replacing it
+with Homebrew's 1.0.30 (arm64, same compatibility version 4.0.0):
+
+    sudo mv /Library/SDRplayAPI/3.15.1/bin/libusb-1.0.0.dylib{,.orig}
+    sudo cp /opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib \
+            /Library/SDRplayAPI/3.15.1/bin/libusb-1.0.0.dylib
+    sudo killall -TERM sdrplay_apiService
+
+Code signing accepted it (the daemon runs). With it, the open/claim layer is
+clean — no more exclusive-access errors on a fresh plug — and the failure is
+isolated to the endpoint-0 timeout above. The firmware upload still fails, so
+this is necessary-but-not-sufficient. Original library kept as `.orig`.
+
+## Where this stands, and the decisive next test
+
+No public report of this exact failure exists as of writing (searched GitHub
+issues, sdrplayusers.net, groups.io, the SDRplay forum). Two candidate
+explanations remain: macOS 26 changed control-transfer handling in a way that
+breaks the upload, or this RSP1B hardware revision (bcdDevice 0x0200) needs a
+newer upload sequence than API 3.15.1 has.
+
+**SDRconnect** — SDRplay's own application — talks to RSPs directly without
+the API daemon. If it runs the device, the hardware and OS are fine and the
+API daemon is the broken piece (report to SDRplay, and try letting SDRconnect
+load the firmware then probing the API against the already-programmed
+device). If SDRconnect also fails, the RSP1B/Tahoe combination is broken
+below anything user-side software can fix.
