@@ -153,3 +153,34 @@ small enough interface that a SoapySDR-backed class can sit behind it and leave
   A 14-bit ADC has a different noise floor, so `SNR_MIN`, the presence floor
   and the flatness gates all need re-checking against known channels rather
   than assumed to transfer.
+
+## Outcome as of API 3.15.1 on macOS 26.3.1 (Tahoe): NOT WORKING
+
+Every layer verified correct, and it still does not enumerate:
+
+* API opens, `sdrplay_api_ApiVersion` returns 3.15 matching the header, so the
+  client-to-daemon IPC is fine
+* `sdrplay_api_GetDevices` returns `sdrplay_api_Fail`, count 0
+* the daemon log shows libusb unable to claim the device, every attempt
+* device is on the bus, configured (`kUSBCurrentConfiguration = 1`)
+* all binaries universal arm64, daemon running, plugin loading
+
+Tried and did not help: restarting the daemon with `launchctl kickstart -k`;
+restarting it with SIGTERM; unplug then SIGTERM then replug, in that order, so
+nothing could be holding the device while the daemon came back. A daemon 19
+seconds old fails identically to one that has been up for an hour, which rules
+out a leaked handle from its own retries.
+
+Not yet tried: **a reboot with the device attached.** This is worth doing
+before concluding anything, because Apple's macOS 26 security notes describe
+USB Restricted Mode applying to accessories connected *during boot* — a
+different path from hot-plug.
+
+If a reboot does not fix it, the likely answer is that API 3.15.1 predates
+macOS 26 and does not support it. 3.15 is the newest on SDRplay's download
+page, and no report of an RSP working on Tahoe could be found. That is
+SDRplay's to fix.
+
+One honest note on method: a dozen probe runs were made while diagnosing, each
+of which opens the API. If any leaked a claim, the debugging was contributing
+to the symptom. Probe once after a clean sequence, not repeatedly.
