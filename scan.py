@@ -489,7 +489,13 @@ def level_db(iq, gain_db=0.0):
 # simply does not listen — everything else works exactly the same.
 WHISPER_BIN = os.environ.get("WHISPER_BIN", "/opt/homebrew/bin/whisper-cli")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "models/ggml-small.en.bin")
-WHISPER_HOLD_S = 600.0        # how long a confirmation stands
+# A confirmation stands until we LISTEN AGAIN and hear nothing. A pure timer
+# was wrong: transcripts expired after 10 minutes while a channel's next
+# listen was up to 30 minutes away, so every confirmed channel spent 20
+# minutes with nothing to show and whisper had no chance to renew it. This is
+# only a backstop for a channel we never manage to hear again — it matches
+# FORGET_S, the point at which the track itself is dropped.
+WHISPER_HOLD_S = 3600.0
 WHISPER_QUEUE = 16            # bounded: drop the oldest rather than lag behind
 # Whisper's own non-speech annotations, plus the music marker. "\u266a The car
 # is not a sweater \u266a" came back from a 4.8 dB channel that is silent on a
@@ -582,11 +588,21 @@ def whisper_worker():
                 with heard_lock:
                     heard[round(freq_hz)] = (time.time(), txt[:120])
                 print(f"  [heard] {freq_hz/1e6:10.4f}  {txt[:60]}", flush=True)
+            else:
+                # Listened and heard nothing. THAT is what retires a
+                # transcript — evidence, not the passage of time.
+                with heard_lock:
+                    for k in [k for k in heard
+                              if abs(k - freq_hz) <= HEARD_TOL_HZ]:
+                        del heard[k]
         except Exception:
             pass
 
 
-def heard_recently(freq_hz, tol_hz=4000.0):
+HEARD_TOL_HZ = 4000.0
+
+
+def heard_recently(freq_hz, tol_hz=HEARD_TOL_HZ):
     now = time.time()
     with heard_lock:
         for f, (when, txt) in heard.items():
@@ -2290,9 +2306,17 @@ def main(argv):
                 order = sorted(groups.items(), key=worth, reverse=True)
                 for center, members in order[:VERIFY_SLICES_PER_LAP]:
                     by_freq = {m["freq"]: m for m in members}
+                    # Every OTHER confirmed channel that falls inside this same
+                    # capture. They are not due for a verdict, but the audio is
+                    # already paid for, so hand it to whisper.
+                    half = span / 2
+                    extra = [m["freq"] for m in live_now
+                             if abs(m["freq"] - center) < half
+                             and m["freq"] not in by_freq]
                     try:
                         r.set_gain(GAIN_LADDER[-2])
-                        res = verify_slice(r, center, list(by_freq), pool)
+                        res = verify_slice(r, center, list(by_freq), pool,
+                                           also_listen=extra)
                     except Exception:
                         continue
                     apply_verdicts(res, by_freq, t0)
