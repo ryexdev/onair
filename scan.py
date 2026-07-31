@@ -788,7 +788,7 @@ class Gains:
         return self.i[key] != i
 
 
-def verify_slice(r, center_hz, freqs, pool):
+def verify_slice(r, center_hz, freqs, pool, also_listen=()):
     """Judge EVERY confirmed channel inside one capture, not one at a time.
 
     A 2.4 MHz capture already contains ~150 channels — the same fact band mode
@@ -858,7 +858,34 @@ def verify_slice(r, center_hz, freqs, pool):
                   flush=True)
             return f, None
 
-    return [x for x in pool.map(judge, freqs) if x[1]]
+    res = [x for x in pool.map(judge, freqs) if x[1]]
+
+    # LISTEN to every other confirmed channel in this capture as well.
+    #
+    # The capture already contains all ~40 channels in the slice; we paid the
+    # radio time once. Extracting one costs 1.6 ms and a presence check a few
+    # more, so listening to the rest is CPU only — no extra dwell, no extra
+    # lap time. Without this, a channel was only ever heard when it happened
+    # to be DUE for re-verification, which with a full board is every 30
+    # minutes, so whisper sat 99.6% idle (281 runs in 9.5 hours) while
+    # transcripts expired for want of anything to listen to.
+    #
+    # These channels get NO verdict from this pass — only whisper can act on
+    # them, via apply_heard. We are buying audio, not opinions.
+    def listen_only(f):
+        try:
+            y = channelize(iq, RATE, off + (f - center_hz), CHAN_RATE, pre=spec)
+            pres = metrics(y, CHAN_RATE)[4]
+            if not np.isnan(pres) and pres >= LISTEN_MIN_PRES:
+                queue_listen(f, y, CHAN_RATE)
+            else:
+                listen_stats["gated"] += 1
+        except Exception:
+            pass
+
+    if listening and also_listen:
+        list(pool.map(listen_only, also_listen))
+    return res
 
 
 def syllabic(y, rate):
