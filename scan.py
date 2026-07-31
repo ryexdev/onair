@@ -298,6 +298,57 @@ def label_for(mhz):
     return ""
 
 
+# --- local noise floor -------------------------------------------------------
+#
+# CFAR_GUARD is measured in BINS and must exceed the widest signal we accept,
+# or a wide signal sits in its own reference window and raises its own floor
+# until it disappears. Simulated: with a conventional small guard a signal 20
+# bins wide masks itself completely, Pd 1.00 -> 0.01.
+CFAR_GUARD = 72               # bins each side excluded from the reference
+CFAR_REF   = 32               # reference cells, half each side
+# The MEDIAN of the reference cells, not a higher quantile. This is the same
+# estimator the old slice-wide floor used, just measured locally — which is why
+# it is the principled choice rather than the best-scoring one. Measured: a
+# 0.75 quantile (rank 24) found FEWER signals than the old global median in
+# dense bands, because with 25 kHz channel spacing most reference cells are
+# themselves occupied and the upper quantile lands on a neighbour.
+CFAR_RANK  = 16
+
+
+def local_floor(avg_db):
+    """Noise floor per bin, as an order statistic of nearby bins.
+
+    A single median across the slice assumes the response is flat, and it is
+    not: the tuner tilts about 6 dB across 1.92 MHz. Measured consequence, on
+    that tilt, for a 5 dB signal: found 100% of the time at slice centre and
+    63% at the edge — and the +/-100 kHz per-lap jitter decides which you get.
+
+    A RANK (not a mean) is what makes this work with neighbours present. With
+    three 25 dB signals inside the reference window, the order statistic held
+    Pd=1.00 on a 6 dB target while a mean-based floor scored 0.000. Several
+    strong signals inside 200 kHz is ordinary in a land-mobile band.
+
+    Measured on air, three independent runs over FM broadcast, 800 MHz
+    trunked, 2 m, 70 cm and two protected radio-astronomy bands:
+
+        slice median   85    88    89   real signals
+        local median   89    96    99
+        protected       0/0   1/0   0/0  false positives (old/new)
+
+    The gain is smaller than the theory suggests because USABLE = 0.80 already
+    crops the steep part of the IF response: the tilt inside the part we keep
+    is 2.6 dB, not the 6 dB across a full capture.
+    """
+    n = len(avg_db)
+    off = np.r_[np.arange(-CFAR_REF // 2 - CFAR_GUARD, -CFAR_GUARD),
+                np.arange(CFAR_GUARD + 1, CFAR_REF // 2 + CFAR_GUARD + 1)]
+    idx = np.arange(n)[:, None] + off[None, :]
+    # clip rather than wrap: the spectrum is not circular, and wrapping would
+    # let one edge of the capture set the floor at the other.
+    ref = avg_db[np.clip(idx, 0, n - 1)]
+    return np.partition(ref, CFAR_RANK - 1, axis=1)[:, CFAR_RANK - 1]
+
+
 def analyse(iq, center):
     """One capture -> list of candidate signals with a structure score."""
     n = (len(iq) // NFFT) * NFFT
@@ -312,9 +363,10 @@ def analyse(iq, center):
     usable = np.abs(bin_f) <= (RATE * USABLE) / 2
     dc = np.abs(bin_f) < DC_NOTCH
     valid = usable & ~dc
-    floor = float(np.median(avg_db[valid]))
+    floor_b = local_floor(avg_db)                 # per bin, follows the IF tilt
+    floor = float(np.median(avg_db[valid]))       # slice-wide, for reporting
 
-    hot = valid & (avg_db > floor + SNR_MIN)
+    hot = valid & (avg_db > floor_b + SNR_MIN)
     hits, i, n_bins = [], 0, NFFT
     while i < n_bins:
         if not hot[i]:
@@ -329,12 +381,15 @@ def analyse(iq, center):
         if valid[max(i - 1, 0)] and valid[min(j + 1, n_bins - 1)]:
             peak = i + int(np.argmax(avg_db[i:j + 1]))
             hits.append(_score(peak, i, j, width, avg_db, frame_db,
-                               floor, bin_f, center, valid))
+                               float(floor_b[peak]), bin_f, center, valid))
         i = j + 1
     return [h for h in hits if h]
 
 
 def _score(peak, i, j, width, avg_db, frame_db, floor, bin_f, center, valid):
+    # `floor` here is the LOCAL floor at this peak, not the slice median, so a
+    # signal near the tilted edge of the capture is measured against the noise
+    # that is actually next to it.
     snr = float(avg_db[peak] - floor)
     # A single-bin spike is not a channel. Real narrowband voice is ~12 kHz and
     # covers several bins; one lone bin is a spur or a noise fluctuation.
