@@ -579,3 +579,161 @@ older copies of the classification tree, which is exactly the drift that caused
 two separate bugs — the sweep and band mode disagreeing about the same channel,
 and a verdict that could never be upgraded. `scan.py` does both jobs from one
 `classify()`.
+
+---
+
+# Cross-checked against a second independent implementation
+
+A different attempt at the same problem, by a different author, was compared
+against this one. Everything below was either measured here on the hardware or
+is a measurement from that project reproduced or refuted here.
+
+## Sample rate: 3.2 Msps is stable and still wrong
+
+Measured delivered-vs-requested on this dongle, 4 x 0.5 s reads at each rate:
+
+    2.048M 98.7%   2.400M 98.8%   2.560M 98.5%   2.880M 98.2%   3.200M 98.4%
+
+So 3.2 Msps does NOT drop samples here, contrary to the usual advice. But the
+usable bandwidth does not follow. IF response measured at 750 MHz, normalised
+to the middle 30%:
+
+    2.4 Msps, keep 1.92 MHz (ours)  ->  -1.7 dB at the edge
+    3.2 Msps, keep 2.80 MHz         ->  -8.9 dB at the edge
+    3.2 Msps, keep 2.24 MHz         ->  -2.8 dB
+
+The mechanism is in librtlsdr: r82xx_set_bandwidth is called from
+set_sample_rate with bw = rate, and the branch threshold is 2,430,000 Hz. At
+2.4 Msps the dynamic path gives a real 2.43 MHz filter with an anti-alias
+skirt. At 3.2 Msps it falls through to the 6 MHz DVB-T setting, which is flat
+but has NO anti-alias protection, so energy 1.6-3.0 MHz off-centre folds back
+into the band being kept. Their extra bandwidth is both attenuated and
+alias-contaminated.
+
+2.56 Msps is the untested candidate worth measuring: exact clock divider,
+stays below the 2.43 MHz filter threshold, +6.7% bandwidth.
+
+Setting the tuner bandwidth explicitly (rtlsdr_set_tuner_bandwidth, which we
+never call) moved the -3 dB point from 2.44 to 2.60 MHz at bw=5 MHz, but the
+readings were noisy and one row was physically implausible. Needs repeats.
+
+## False alarm rate, measured against protected spectrum
+
+Radio astronomy bands are protected: nothing may legally transmit there, so
+any confirmed detection is a false positive. Run at our live thresholds
+(SNR_MIN 4.0, SCORE_MIN 0.5, CONFIRM_LAPS 3), 20 laps, counting only hits
+strictly inside each band:
+
+    608-614 MHz      0 false positives
+    1400-1427 MHz    0 false positives
+    73.0-74.6 MHz    7, each seen 3-4 laps of 20
+    144-148 control  12 confirmed real signals
+
+= 0.20 false positives per MHz across 34.6 MHz. The 73-74.6 hits sit next to
+FM broadcast in VHF low and are plausibly real breakthrough rather than
+detector error.
+
+This REFUTES, for our architecture, the other project's finding that a 10 dB
+threshold with 3-lap confirmation produced 68 false positives in a guard band
+and that "multi-lap confirmation cannot filter a bias". We detect at 4 dB with
+0.2/MHz. The difference is that our score (persistence x prominence x
+stability) does work a bare dB threshold does not.
+
+NOTE the first version of this test was WRONG twice: it binned at 1 kHz while
+per-lap jitter moves peaks further than that, so nothing matched across laps
+and it reported 0 confirmed in every band including the control; and it did not
+confine hits to the band, so a 1.92 MHz slice centred on a 1.6 MHz band
+imported real signals from outside it.
+
+## The threshold is fine; the noise floor is the bug
+
+With FRAMES=48 each bin is Gamma(48), and the exact CA-CFAR threshold for
+Pfa=1e-5 over a perfect floor estimate is 2.45 dB. Our 4 dB gate is already
+conservative. What costs us is the floor ESTIMATE: simulated with the 6 dB IF
+tilt measured above, a 5 dB signal is detected with
+
+    Pd = 1.00 at slice centre,  Pd = 0.63 at the slice edge
+
+That is the whole weakness, and the +/-100 kHz jitter turns it into a lottery.
+
+The fix is a local rank-order floor (OS-CFAR), not a different threshold.
+Order statistics are required rather than a mean: with three 25 dB neighbours
+in the reference window, OS-CFAR held Pd=1.00 on a 6 dB target while CA-CFAR
+and GO-CFAR both scored 0.000. That case is normal in a 25 kHz land-mobile
+band. Cost 0.42 ms per 1024-bin slice against a 51 ms step.
+
+Guard cells must be sized to the widest signal accepted, and neither project
+does this: with conventional guard sizing a signal 20 bins wide masks ITSELF
+completely, Pd 1.00 -> 0.01. Guard 72 holds Pd=1.00 out to 128 bins at no
+false-alarm cost.
+
+Expected gain: Pd=0.9 moves from 3.5 dB to 1.0 dB, and the slice edge from
+0.63 to 1.00.
+
+## Frequency calibration: our evidence was not good enough
+
+Earlier in this project the readings below were taken as evidence of a 1-3 ppm
+bias:
+
+    NOAA   162.5500 -> 162.5498   (-200 Hz)
+    ham    147.0000 -> 146.9998   (-200 Hz)
+    ham    447.1400 -> 447.1388   (-1200 Hz)
+
+Two of the three are ham repeaters, and Part 97 sets NO numeric frequency
+tolerance; a repeater TCXO is typically +/-1-2.5 ppm, which is the whole size
+of the effect. They cannot be used as references. And the residual left after a
+pure-ppm fit is explained by the R828D PLL quantisation: the RF step is
+2*28.8e6/65536/mix_div, i.e. 54.9 Hz at VHF and 219.7 Hz at UHF, so the -1200 Hz
+reading sits inside a deterministic sawtooth that depends on which slice centre
+we happened to tune. So we do not currently know whether we have a ppm error.
+
+The reference to use is the ATSC 8VSB pilot, 309440.559 Hz above the lower
+channel edge: unmodulated, +15 dB, and available across 174-602 MHz, which is
+the frequency lever needed to separate a slope from an offset. Rejected
+alternatives, with reasons: NOAA is a single VHF point with no lever, and the
+other project measured its spread at 671 Hz against 5.7 Hz for a pilot; the FM
+19 kHz pilot is specified to +/-2 Hz = +/-105 ppm, a hundred times worse than
+the error being measured; GPS L1 needs correlation and has satellite Doppler;
+GSM/kalibrate is dead in the US since 2024.
+
+Correct in software, not via rtlsdr_set_freq_correction: that API takes
+INTEGER ppm, and the correction is around 0.5-2.5 ppm, so quantisation is the
+same size as the quantity.
+
+## Smaller findings worth keeping
+
+* NYQUIST GATE on symbol rate. A claimed symbol rate above about 1.5x the
+  occupied bandwidth is impossible. Theirs caught 15973 baud claimed inside a
+  2.9 kHz channel. We have no such gate, and our symbol-clock test can report
+  one.
+* SUB-HARMONIC. Cyclostationary symbol-rate estimates commonly land on HALF
+  the true rate; theirs returned 2401 for a 4802 signal. Our kind_of takes a
+  single argmax with only a cross-half agreement check.
+* The 19 kHz FM STEREO PILOT reads as a symbol clock and yields "digital".
+* SHARED-PPM HARMONIC TEST as a comb discriminator: 11 harmonics from 36-228
+  MHz agreeing to +/-0.16 ppm identified a local oscillator. A frequency-RATIO
+  test does not work at this density - it accepted 180.0000 (+392 Hz) and
+  rejected a genuine 480.0000 (-62 Hz). This is a better answer than our
+  hardcoded 12/27/28.8 MHz list, which permanently blinds us to 144.000,
+  432.000, 120.000, 132.000 and 456/459/468.
+* DEVICE LAYER. We have no lockfile, no atexit, no context manager, which is
+  why two of our own tools cannot share the dongle. Their "exactly one reopen
+  then give up" rule is right when the device still enumerates but wrong when
+  it does not - polling an absent device touches no endpoint, and giving up
+  there loses the whole board for a cable event. Branch on
+  rtlsdr_get_device_count().
+* If their device layer is ever ported: their exceptions subclass Exception,
+  not RuntimeError, and our sweep catches RuntimeError only. Adopting it as-is
+  silently reintroduces the unplug crash.
+* Their frequency-to-allocation table is 1287 entries against our 109 ranges,
+  but cites no external sources and has verified errors: NOAA-15 and NOAA-18
+  APT frequencies swapped, the ILS localiser rule applied across 108-117.95
+  when localisers only exist 108.10-111.95, and AAR railroad channel numbering
+  starting at the wrong channel. Ours is smaller, sourced, and correct.
+* Their modulation classifier is explicitly unvalidated by its own author:
+  "the symbol-rate measurement is the trustworthy part of this tool; the
+  modulation label is not". Their two intended AM controls turned out to be
+  their own local oscillators.
+* CORROBORATION for leaving the schedule alone: they reverted "longer dwell
+  finds more" three times, and an interleaved A/B across a 2x dwell range
+  agreed to 0.3%. Doubling dwell took detections DOWN, 125-138 to 105-122.
