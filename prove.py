@@ -29,7 +29,7 @@ SECS      = 10.0
 OFFSET    = 300_000       # tune off-centre so the DC spike is never the signal
 
 
-def safe_offset(f_hz, off=OFFSET):
+def safe_offset(f_hz, off=OFFSET, clocks=None):
     """Pick a tuner offset that does not park the centre on a local clock.
 
     The centre is where the DC spike and the strongest local leakage sit. With
@@ -38,11 +38,20 @@ def safe_offset(f_hz, off=OFFSET):
     three offsets: 29.1 read -0.7 / -0.1 / +9.3 dB, a 10 dB spread from nothing
     but where the tuner was pointed, while NOAA read 37.9 / 37.9 / 37.8.
     Flipping the offset when the centre lands near a clock costs nothing and
-    removes a whole class of false readings."""
+    removes a whole class of false readings.
+
+    `clocks` defaults to the RTL-SDR's set. Pass the caller's own list — the
+    RSP1B does not have a 28.8 MHz reference and avoiding it there displaces
+    the capture for nothing. That matters beyond tidiness: the candidates are
+    tried smallest-first, and every needless rejection pushes the search onto
+    the ±2x offset, which is the only one wide enough to reach past Nyquist.
+    """
+    if clocks is None:
+        clocks = (28_800_000.0, 12_000_000.0, 27_000_000.0)
     for cand in (off, -off, off * 2, -off * 2):
         c = f_hz - cand
-        if all(abs(c - round(c / clk) * clk) > 400_000 for clk in
-               (28_800_000.0, 12_000_000.0, 27_000_000.0)) and c > 1e6:
+        if all(abs(c - round(c / clk) * clk) > 400_000
+               for clk in clocks) and c > 1e6:
             return cand
     return off
 CHAN_RATE = 48_000        # baseband rate; +/-24 kHz covers any NFM channel

@@ -974,19 +974,28 @@ def verify_slice(r, center_hz, freqs, pool, also_listen=()):
     become the new bottleneck — hence the thread pool. numpy releases the GIL
     for FFTs, so this genuinely uses the cores.
     """
-    from prove import channelize, spectrum, metrics, CHAN_RATE, OFFSET
+    from prove import channelize, spectrum, metrics, safe_offset, CHAN_RATE
     # Do not let the capture centre land on a local clock. Slice centres are a
     # multiple of the span, and for a channel at 28.7625 that multiple IS
     # 28.8 MHz — the dongle's reference, which measures 64 dB. The channel read
-    # 46 dB on the board and 0.6 dB when tuned properly. Same bug fixed in
-    # prove.py last hour; the scanner's own verify path still had it.
-    tune_at = center_hz - OFFSET
-    for _ in range(4):
-        if all(abs(tune_at - round(tune_at / c) * c) > 400_000
-               for c in (28_800_000.0, 12_000_000.0, 27_000_000.0)):
-            break
-        tune_at += 500_000
-    off = center_hz - tune_at
+    # 46 dB on the board and 0.6 dB when tuned properly.
+    #
+    # This used to walk +500 kHz up to four times, and TWO things were wrong
+    # with that. It only ever moved UP, so the offset grew without bound
+    # instead of flipping sign; and it tested the RTL-SDR's clocks as literals
+    # while CLOCKS_HZ exists for exactly this and is empty on the RSP1B, so
+    # ~12% of slices were displaced for no reason at all.
+    #
+    # The damage was silent. channelize's `idx % n` (prove.py:75) WRAPS: ask
+    # for a channel past Nyquist and it returns a different one, with no error.
+    # Over 908 slice centres, 89 walked twice — putting the slice centre itself
+    # past Nyquist — and every channel in them got a confident verdict about
+    # the wrong frequency.
+    #
+    # safe_offset() in prove.py has searched (off, -off, 2*off, -2*off) for a
+    # long time. The scanner kept a sign-locked copy. Use the real one.
+    off = safe_offset(center_hz, clocks=CLOCKS_HZ)
+    tune_at = center_hz - off
     r.tune(tune_at)
     r.flush()
     listening = whisper_ok()
@@ -1000,6 +1009,12 @@ def verify_slice(r, center_hz, freqs, pool, also_listen=()):
     def judge(f):
         try:
             off_f = off + (f - center_hz)
+            # channelize wraps rather than complaining: `idx % n` at
+            # prove.py:75 turns a request past Nyquist into a DIFFERENT
+            # channel, silently, and classify then reports a verdict for a
+            # frequency nobody asked about. Refuse instead of guessing.
+            if abs(off_f) > RATE * 0.48:
+                return f, None
             y = channelize(iq, RATE, off_f, CHAN_RATE, pre=spec)
             v = classify(y, CHAN_RATE)
             # Anything with a carrier is a listening candidate — not just the
