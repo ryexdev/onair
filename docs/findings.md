@@ -51,6 +51,31 @@ recover.
   `voice` was one of the ~5.5% of verdicts computed on the WRONG FREQUENCY.
   No classifier change was needed or made.
 
+- [ ] **V — the clock test fails on BURSTY signals, so pagers read `voice`.**
+  `kind_of()` masks down to the loud blocks, then throws that mask away when it
+  covers under half a second (`idx.sum() > rate // 2`, prove.py) — which is
+  exactly when the signal is bursty and the mask is needed. The clock is then
+  measured across bursts AND the silence between them, which smears it into
+  nothing. It also splices the loud blocks together and runs `np.diff` straight
+  across every join, adding more garbage.
+
+  Confirmed live on **152.2100**, a VHF pager, four captures:
+
+      flat 0.187  c1 12.6 @ 8001 Hz   c2 13.3 @  917 Hz  -> voice
+      flat 0.183  c1 12.0 @ 2977 Hz   c2 11.5 @ 2025 Hz  -> voice
+      flat 0.181  c1 13.2 @ 4087 Hz   c2 13.1 @ 1590 Hz  -> data
+      flat 0.180  c1 12.0 @  505 Hz   c2 12.1 @ 1343 Hz  -> data
+
+  Flatness pinned at 0.18 — a machine, nothing like the 0.5-0.9 of real voice.
+  Both halves land at 12-13 dB against an 18 dB gate and disagree wildly on
+  frequency, so `digital` is ruled out and it falls through to the rhythm
+  score, which flaps around 6.0 and lands on `voice`.
+
+  Supersedes the earlier SUSPECTED note on 929.6125, which was resynthesis;
+  this is the same defect measured live on a second channel.
+  *Fix:* measure the clock on the longest CONTIGUOUS loud run — no splicing, no
+  half-second minimum. Check against the recorded clips before shipping.
+
 - [ ] **V — real VOICE intermittently reads `digital` on an exact ~8 kHz line.**
   The opposite defect, found while checking the above. Three captures each:
 
@@ -67,7 +92,7 @@ recover.
   hum item below — a stable tone is precisely what agrees across halves.
   Needs: identify the 8 kHz line before touching `clock()`.
 
-- [ ] **V — idle carriers read `digital`.** `clock()` prove.py:212-220 has no
+- [x] DONE — **V — idle carriers read `digital`.** `clock()` prove.py:212-220 has no
   mains-hum notch, while `metrics()` notches 60 Hz harmonics 12 lines earlier
   (prove.py:140-143) for exactly this reason. 268.2 — the channel that motivated
   the whole carrying test — measures `c1=23.3`, `c2=22.0`, both at **359.9 Hz =
@@ -78,6 +103,9 @@ recover.
 ---
 
 ## P2 — coverage we are paying for and not getting
+
+*(band mode's 1.9 MHz item is last here on purpose: it affects band
+mode only, and the sweep is what actually gets used.)*
 
 - [ ] **V — band mode still slices at the RTL-SDR's 1.9 MHz.** scan.py:2038
   hardcodes `1_900_000.0` while the sweep correctly uses `RATE * USABLE`.
@@ -164,7 +192,17 @@ recover.
   silently loses its only real overload signal.
   *Fix:* return `None` on unknown; `Gains.adapt` leaves gain alone.
 
-- [ ] **V — a false-positive `voice` can never be retired.** `apply_heard`
+- [x] DONE (false-NEGATIVE half) — **V — whisper was gated on the verdict.**
+  `judge()` skipped `quiet`/`noise`, so a wrong verdict silenced the only thing
+  that could revise it. 448.0600, a repeater with people talking non-stop, sat
+  as `quiet` with no transcript: presence a steady ~30 dB, but dynamics
+  0.21-1.52 under a 0.70 gate left the verdict riding on a rhythm score that
+  swung 5.8-22.6 against a threshold of 6.0. Now gated on level alone;
+  `LISTEN_MIN_PRES` already did that job. It read `voice` within one lap.
+
+- [ ] **V — a false-positive `voice` can never be retired.** Still open: the
+  above fixed the false-negative direction only. `apply_heard` upgrades to
+  voice and never downgrades, so 406.125 keeps its wrong label forever. `apply_heard`
   scan.py:1364-1374 only upgrades. Whisper hearing nothing deletes the
   transcript (scan.py:669) but the structural verdict stays, held by
   `vpos`/`VERDICT_HOLD_S`. This is 406.125's situation exactly.
@@ -192,9 +230,6 @@ recover.
   LNA sweep on one known channel per decade.*
 - [ ] **S — `r.set_gain(GAIN_LADDER[-2])` at scan.py:2449** discards the
   per-step adapted gain for every verify capture.
-- [ ] **S — 929.6125 pager reads `voice`, not `digital`.** The FLEX clock is
-  present (3199.3 Hz) but `clock()` runs `np.diff` across splice joins
-  (prove.py:213). *Fix if real:* compare contiguous loud runs, not array halves.
 - [ ] **S — band mode ring lag.** `read()` takes the OLDEST bytes
   (rsp.py:438) contradicting the reader docstring. Harmless in sweep
   (`flush()` empties first); in band mode timestamps could drift up to the 4 s
