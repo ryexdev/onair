@@ -737,3 +737,71 @@ same size as the quantity.
 * CORROBORATION for leaving the schedule alone: they reverted "longer dwell
   finds more" three times, and an interleaved A/B across a 2x dwell range
   agreed to 0.3%. Doubling dwell took detections DOWN, 125-138 to 105-122.
+
+
+---
+
+# The RSP1B: what changed and what did not
+
+Measured on the same antenna, within minutes of the RTL-SDR baseline.
+
+## What the hardware buys
+
+    usable per tune   1.92 MHz     ->  5.10 MHz
+    coverage          24-1766 MHz  ->  0.5-2000 MHz
+    steps per lap     908          ->  393  (more spectrum, fewer steps)
+    retune            ~28 ms       ->  2.9 ms median
+    ADC               8-bit        ->  14-bit at 6 Msps
+    NOAA 162.55 SNR   38.7 dB      ->  43.0 dB
+
+## The trap: sample rate silently costs you bits
+
+The RSP1B accepts 10 Msps and streams it cleanly, which makes it look like the
+obvious choice. It is not. ADC resolution falls with sample rate — 14-bit only
+to 6.048 MSPS, then 12, 10, 8 — so 10 Msps runs the ADC at 10-bit and throws
+away the dynamic range that is the entire reason to prefer this hardware.
+
+Confirmed rather than taken from the datasheet, by counting distinct sample
+values in a capture: 5480 at 6 Msps against 2046 at 10 Msps. 2046 is 2^11
+almost exactly. That is ~1.4 bits, roughly 8.5 dB, traded for 4 MHz.
+
+So RATE is 6 Msps. Measured IF response there, referenced to the middle 30%:
+-0.96 dB at 70% keep, -1.05 at 80%, -1.25 at 85%, -5.80 at 90%, -21.41 at 95%.
+USABLE = 0.85 -> 5.10 MHz.
+
+## The thresholds transferred, which was not expected
+
+Every detection threshold was measured through an 8-bit ADC with a different
+noise floor, so the plan was to re-derive them. Measured instead, 12 laps
+against protected radio-astronomy spectrum where nothing may legally transmit:
+
+    RSP1B    0.18 confirmed false positives per MHz
+    RTL-SDR  0.20 per MHz  (same test, same day)
+
+Statistically identical, with real signals still confirmed in a 2 m control
+band. No threshold changed.
+
+Open: all 6 of the RSP1B false positives are in 1400-1427 MHz, where the
+RTL-SDR found zero. The RTL-SDR barely reached that band and the RSP1B has
+real sensitivity there, so these may be genuine weak signals rather than
+detector error. Worth investigating; not worth changing a threshold over.
+
+## Two things that would have broken silently in the port
+
+Width limits were expressed in BINS. 128 bins is 300 kHz at the RTL-SDR bin
+size and 187 kHz at the RSP1B's, so carrying the number across would have
+quietly redefined what counts as a channel. They are Hz now.
+
+The gain ladder ran the wrong direction. The RSP1B has no gain in dB; it has 9
+LNA states where a HIGHER state means MORE gain reduction, i.e. LESS
+sensitivity. adapt() assumes "index up = more gain", so the indices would have
+driven gain backwards on every adaptation. Both ladders are now ordered
+least-to-most sensitive. Measured on NOAA: state 0 gives 0.4 dB SNR, state 2
+gives 43.0 (the best), falling to 13.3 by state 8.
+
+## Not exposed by the WebSocket path
+
+Probed and absent: IF bandwidth selection, the FM/MW/DAB notch filters,
+bias-T, decimation, ppm trim. Present and new: `overload`, a hardware flag we
+previously had to infer from sample statistics, and `signal_power`, calibrated
+absolute dBm.
