@@ -188,7 +188,26 @@ def load_spurs(path=None):
 # run rather than inherited. An inherited list is worse than no list: it
 # silently deletes real channels.
 if BACKEND == "rsp":
-    CLOCKS_HZ = ()
+    # 12 MHz carries over, and ONLY 12 MHz. It is not the dongle's reference —
+    # it is the computer's, radiated and picked up by whatever antenna is
+    # attached, so changing the radio does not change it. Measured on the
+    # RSP1B board: 60 of 405 strong hits were exact multiples of 12.000000 MHz,
+    # and the comb was being believed:
+    #
+    #     360.0000 =  30 x 12 MHz   digital  53.9 dB
+    #    1920.0025 = 160 x 12 MHz   voice    41.9
+    #    1824.0000 = 152 x 12 MHz   voice    41.8
+    #    1680.0000 = 140 x 12 MHz   data     41.5
+    #      36.0000 =   3 x 12 MHz   voice    34.5
+    #
+    # 1536.0000 (= 128 x 12) was briefly mistaken for an Inmarsat downlink,
+    # which is what a 38 dB carrier in the L-band looks like until you divide.
+    #
+    # 28.8 is NOT carried over: that is the RTL-SDR's own reference and this
+    # hardware does not have it. 27.0 is not carried over either — it was
+    # measured through the RTL and has not been re-measured here. An inherited
+    # comb is worse than no comb, because it silently deletes real channels.
+    CLOCKS_HZ = (12_000_000.0,)
 else:
     CLOCKS_HZ = (28_800_000.0, 12_000_000.0, 27_000_000.0)
 
