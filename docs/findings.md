@@ -144,7 +144,7 @@ mode only, and the sweep is what actually gets used.)*
 
 ## P3 — footguns and small correctness
 
-- [ ] **V — importing `scan.py` kills the running scanner's stream.**
+- [x] DONE — **V — importing `scan.py` kills the running scanner's stream.**
   `_pick_backend()` runs at import (scan.py:73) → `rsp.find()` builds a full
   `Rsp`, enables both streams, then `close()` sends `iq_stream_enable=false` to
   the *shared* server. Six modules import scan: prove.py, tools/meter.py,
@@ -152,7 +152,7 @@ mode only, and the sweep is what actually gets used.)*
   *Fix:* `find()` should connect, `get("valid_devices")`, close. Never touch
   `selected_device`, `device_sample_rate` or the stream enables.
 
-- [ ] **V — a `read()` larger than the ring is an infinite restart loop, not an
+- [x] DONE — **V — a `read()` larger than the ring is an infinite restart loop, not an
   error.** rsp.py:429-443: if `need > _RING_BYTES` the condition is
   unsatisfiable, so it raises the *misleading* "no IQ for 5 s", scan.py:2296
   calls `reopen()`, `close()` terminates SDRconnect, and the new `Rsp()` waits
@@ -161,7 +161,7 @@ mode only, and the sweep is what actually gets used.)*
   *Fix:* two lines at the top of `read()` raising `ValueError` when
   `need > _RING_BYTES`.
 
-- [ ] **V — `classify()` answers `noise` after certifying it is not noise.**
+- [x] DONE — **V — `classify()` answers `noise` after certifying it is not noise.**
   scan.py:1094 is only reachable once `pres >= 8.0` passed at scan.py:1057. A
   66 dB presence bump is not noise. Continuous digital data lands here, because
   it is flat *and* doesn't vary in level — scan.py:1069 admits this and then
@@ -169,7 +169,7 @@ mode only, and the sweep is what actually gets used.)*
   *Fix:* terminal branch → `carrier`. Neither is in `CARRYING`, but `noise` is
   the label users filter out first.
 
-- [ ] **V — `burst` is a dead-end verdict.** Added to rescue pagers/TETRA/TPMS
+- [x] DONE — **V — `burst` is a dead-end verdict.** Added to rescue pagers/TETRA/TPMS
   from `noise`, but it is absent from `CARRYING` (scan.py:837), the UI carrying
   filter (scan.py:1873) and the carrying count (scan.py:1882), and `_RANK`
   gives it specificity 0 (scan.py:848) so it never survives a re-check.
@@ -187,7 +187,7 @@ mode only, and the sweep is what actually gets used.)*
   *Fix:* `PROM_GUARD_BINS = max(4, round(28_000 / BIN_HZ))` — a faithful port,
   not a new tuning.
 
-- [ ] **V — `overloaded()` reports False on a failed round trip.** rsp.py:354
+- [x] DONE — **V — `overloaded()` reports False on a failed round trip.** rsp.py:354
   turns `get()`'s `None` timeout into "not overloading", so the gain servo
   silently loses its only real overload signal.
   *Fix:* return `None` on unknown; `Gains.adapt` leaves gain alone.
@@ -200,12 +200,15 @@ mode only, and the sweep is what actually gets used.)*
   swung 5.8-22.6 against a threshold of 6.0. Now gated on level alone;
   `LISTEN_MIN_PRES` already did that job. It read `voice` within one lap.
 
-- [ ] **V — a false-positive `voice` can never be retired.** Still open: the
-  above fixed the false-negative direction only. `apply_heard` upgrades to
-  voice and never downgrades, so 406.125 keeps its wrong label forever. `apply_heard`
-  scan.py:1364-1374 only upgrades. Whisper hearing nothing deletes the
-  transcript (scan.py:669) but the structural verdict stays, held by
-  `vpos`/`VERDICT_HOLD_S`. This is 406.125's situation exactly.
+- [~] OVERSTATED — **a false-positive `voice` can never be retired.** Read the
+  code: `apply_verdicts` protects a more specific verdict only while
+  `now - vpos < VERDICT_HOLD_S` (600 s), after which a less specific re-check
+  DOES replace it. `apply_heard` writes onto display rows, not tracks, and is
+  re-derived each pass from `heard_recently`, which expires with
+  `WHISPER_HOLD_S`. So both overrides are bounded and neither is permanent.
+  406.125 persists because the classifier keeps genuinely answering `voice`
+  every time it is asked — that is the rhythm defect in P1, not a stuck
+  verdict. No change made; do not "fix" this without new evidence.
 
 ---
 
