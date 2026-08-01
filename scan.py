@@ -756,6 +756,14 @@ def surface_stats(y, rate):
                            axis=1)) ** 2
     M = 10 * np.log10(P.mean(axis=0) + 1e-20)
     fr = np.fft.rfftfreq(SURF_NFFT, 1 / rate)
+    # Ignore DC and the mains region. The first two rows collected both came
+    # back peak=0 Hz width=94: the discriminator carries a DC offset that
+    # towers over everything, so every channel was reporting the width of the
+    # DC spike rather than of its signal. clock() has skipped below 200 Hz for
+    # the same reason all along.
+    band = (fr >= 200) & (fr < rate * 0.45)
+    M = M[band]
+    fr = fr[band]
     pk = int(np.argmax(M))
     above = float(M[pk] - np.median(M))
     half = M[pk] - 3.0

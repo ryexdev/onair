@@ -30,3 +30,36 @@ the entire reason for this run.
 ## Log
 
 - cycle 1 — collection started, scanner up, 0 rows so far
+
+- **cycle 2 — the width claim is DEAD, and the first measurement was an artifact.**
+
+  Two things found:
+
+  1. The first two rows collected both read `peak: 0 Hz, width: 94`. The FM
+     discriminator carries a DC offset that towers over everything, so
+     `surface_stats` was reporting the width of the DC spike on every channel.
+     `clock()` has skipped below 200 Hz all along for exactly this reason.
+     Fixed: the measurement now ignores below 200 Hz.
+
+  2. With DC excluded, 90 fresh reference rows over 10 laps:
+
+         voice     live  8/30   width  94..281   median 234
+         digital   live 22/40   width  94..375   median 234
+         carrier   live  6/10   width 281..469   median 281
+         noise     live  0/10   nothing passed the live gate
+
+     Voice and digital have the SAME median and overlapping ranges. The split
+     that motivated this whole run — voice 562 Hz against machines 94-188 Hz —
+     was the DC artifact. It does not exist.
+
+  What DID survive: `is_really_live()` rejected all 10 noise samples and 22 of
+  30 "voice" attempts, which is the contamination filter working exactly as
+  intended. Keep it. That is the only piece of tonight's surface work that has
+  earned its place.
+
+  Still collecting, because a null result on 8 live voice samples is not proof
+  either. But do not build anything on peak width.
+
+  Also noted: whisper ran 31 times this run and returned no words at all
+  (gated 5196), so the automatic voice side is contributing almost nothing.
+  The voice rows above came from direct capture, not from the harvester.
