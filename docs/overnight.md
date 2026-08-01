@@ -63,3 +63,26 @@ the entire reason for this run.
   Also noted: whisper ran 31 times this run and returned no words at all
   (gated 5196), so the automatic voice side is contributing almost nothing.
   The voice rows above came from direct capture, not from the harvester.
+
+- **cycle 3 — harvesters alive, and all three surface numbers are near chance.**
+
+  The automatic collection is working now: 52 rows arrived unattended since the
+  last cycle (21 voice via whisper, 31 digital via clock). 144 total.
+
+  On the 48 rows that pass the live gate — 20 voice, 28 digital:
+
+        width   voice med  281 [ 94.. 562]   digital med  281 [ 94.. 375]   60%
+        above   voice med   19 [  8..  46]   digital med   18 [  8..  36]   69%
+        peak    voice med  516 [281..2625]   digital med 1406 [  0..7969]   65%
+
+  Always guessing "digital" scores 58%. So width at 60% is nothing at all,
+  and above/peak at 65-69% are barely above the floor. All three surface
+  measurements are effectively dead on this data.
+
+  `peak` is the least bad — voice concentrates near 516 Hz, digital spreads to
+  8 kHz — but a 7-point edge over guessing is not a feature.
+
+  Honest position after three cycles: the 3D surfaces are genuinely readable by
+  eye, but every scalar taken off them so far behaves like noise. Either the
+  information is in something these three do not capture, or the sample is
+  still too small at 20 voice. Keep collecting; do not build.
