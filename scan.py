@@ -318,7 +318,25 @@ LABELS = [
     (243.1, 328.6, "mil air"),
     (328.6, 335.4, "glide path"),   (335.4, 399.9, "mil air"),
     (399.9, 406.0, "met/satellite"),(406.1, 420.0, "federal"),
-    (450.0, 470.0, "business"),     (470.0, 608.0, "UHF TV"),
+    (450.0, 470.0, "business"),
+    # 470-512 is the T-band. On the generic US plan it is TV channels 14-20,
+    # and labelling it "UHF TV" is what this used to do — but those channels
+    # were reallocated to LAND MOBILE in 11 metro areas: Los Angeles, New York,
+    # Chicago, Philadelphia, Boston, Washington/Baltimore, Dallas, Houston,
+    # Miami, Pittsburgh and San Francisco. In those markets it is public safety
+    # and business radio, not television.
+    #
+    # Caught by the board disagreeing with reality: 506.4125, 507.3625,
+    # 507.4350, 507.8375, 508.4125 and 508.4900 all came up VOICE or DIGITAL
+    # while labelled "UHF TV". Broadcast television does not look like that.
+    # They are LA County land mobile, and 483.5625 in the same range is LASD
+    # Access on the county mutual-aid plan.
+    #
+    # The metro list is NOT applied conditionally, because nothing in this
+    # program knows where it is and none of it should start guessing. The label
+    # names both possibilities and lets the operator settle it.
+    (470.0, 512.0, "T-band land mobile / TV 14-20"),
+    (512.0, 608.0, "UHF TV"),
     (614.0, 698.0, "TV / 600 cell"),(698.0, 806.0, "700 LTE"),
     # 800 MHz after the 2004 rebanding, downlink side (what we can hear):
     # 851-854 NPSPAC public safety, 854-860 SMR/business, 860-869 ESMR, which
