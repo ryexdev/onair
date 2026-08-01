@@ -310,9 +310,51 @@ class Rsp:
 
     # ---- device ------------------------------------------------------------
 
-    def _select_device(self, index):
-        names = self.get("valid_devices") or ""
+    def _wait_devices(self, secs):
+        """Poll valid_devices until an RSP shows up, or time runs out.
+
+        Asking once is not enough: enumeration is asynchronous, and while it
+        is in progress SDRconnect answers the literal string 'Refreshing...'.
+        A single query right after a restart therefore reports no device when
+        one is seconds away — which is exactly how the first version of this
+        recovery failed.
+        """
+        end = time.time() + secs
+        names = ""
+        while time.time() < end:
+            names = self.get("valid_devices") or ""
+            if "RSP" in names:
+                return names
+            time.sleep(0.5)
+        return names
+
+    def _select_device(self, index, _retry=True):
+        names = self._wait_devices(8.0)
         if "RSP" not in names:
+            # An empty valid_devices does NOT mean the hardware is gone. It
+            # usually means SDRconnect has dropped it while still serving the
+            # WebSocket, which recycling the server fixes without a replug.
+            # Try that once before giving up, because the alternative is the
+            # scanner exiting and the board going dark until someone notices.
+            if _retry and os.path.exists(SERVER):
+                print("  [radio] SDRconnect lost the device — restarting it",
+                      flush=True)
+                self._srv = _recycle_server(self.port)
+                try:
+                    self.s.close()
+                except Exception:
+                    pass
+                self._buf.clear()
+                self._connect()
+                # A freshly started SDRconnect needs longer than a warm one:
+                # it has to re-enumerate USB before it can answer at all.
+                names = self._wait_devices(30.0)
+                if "RSP" in names:
+                    self._send("selected_device", "", str(index))
+                    time.sleep(1.2)
+                    self.name = self.get("active_device")
+                    print(f"  [radio] back: {self.name}", flush=True)
+                    return
             raise RuntimeError(
                 f"SDRconnect sees no RSP (valid_devices={names!r}). "
                 "Another app holding the device, or it needs a replug.")
@@ -475,6 +517,25 @@ def _server_up(port=WS_PORT):
         return False
 
 
+def _recycle_server(port=WS_PORT):
+    """Kill whatever SDRconnect is running and start a clean one.
+
+    SDRconnect loses the RSP1B at the USB level — it keeps serving the
+    WebSocket happily while `valid_devices` goes empty, so from our side the
+    radio simply vanishes. Observed live: the scanner printed "No radio found",
+    exited, and the board went dead with the server still listening on 9002.
+    Restarting SDRconnect brought the device straight back with no replug, so
+    that recovery is worth doing automatically rather than by hand.
+    """
+    try:
+        subprocess.run(["pkill", "-f", "SDRconnect_headless"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    time.sleep(3.0)                       # let the USB device settle
+    return _start_server(port)
+
+
 def _start_server(port=WS_PORT, wait=25.0):
     if not os.path.exists(SERVER):
         raise RuntimeError(f"SDRconnect not found at {SERVER}")
@@ -497,6 +558,11 @@ def find(_hint=None):
     try:
         r = Rsp(start_server=False)
         ok = "RSP" in (r.name or "")
+        # Do NOT let close() terminate the server. If _select_device had to
+        # recycle it, this probe now owns a freshly-working SDRconnect, and
+        # killing it here would make the real open recycle all over again —
+        # two 25 s waits to answer one question.
+        r._srv = None
         r.close()
         return 0 if ok else None
     except Exception:
