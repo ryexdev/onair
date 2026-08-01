@@ -393,7 +393,13 @@ class Rsp:
         have fired. Costs a 6.3 ms round trip, so ask only when the samples are
         hot enough for the answer to plausibly be yes.
         """
-        return (self.get("overload") or "false") == "true"
+        v = self.get("overload")
+        # None, not False, when the round trip fails. get() returns None on a
+        # 2 s timeout, and folding that into "false" told the gain servo the
+        # front end was clean at the exact moment we had lost the ability to
+        # ask — so a wedged reader or a slow server would silently leave the
+        # radio in compression. Unknown is not the same as fine.
+        return None if v is None else (v == "true")
 
     def power_dbm(self):
         """DO NOT USE FOR DETECTION. `signal_power` does not follow our tuner.
@@ -471,6 +477,16 @@ class Rsp:
     def read(self, n_samples):
         """n complex64 samples, scaled to roughly +/-1 like rtl.py's read()."""
         need = int(n_samples) * 4                 # 2 ch x int16
+        # A read bigger than the ring can NEVER be satisfied: the reader trims
+        # the front faster than the tail can reach `need`. It used to fail as
+        # "no IQ from SDRconnect for 5 s", which is a lie — the stream is fine
+        # — and scan.py believes it, calls reopen(), and settles into a
+        # permanent restart-per-step cycle. The 16 -> 96 MB change moved this
+        # cliff; it did not remove it. Say what is actually wrong instead.
+        if need > _RING_BYTES:
+            raise ValueError(
+                f"read of {n_samples} samples ({need >> 20} MB) exceeds the "
+                f"{_RING_BYTES >> 20} MB ring — raise _RING_BYTES")
         end = time.time() + 5.0
         while True:
             if self._err is not None:
@@ -552,21 +568,39 @@ def _start_server(port=WS_PORT, wait=25.0):
 
 
 def find(_hint=None):
-    """Mirrors rtl.find(): returns an index or None."""
+    """Mirrors rtl.find(): returns an index or None.
+
+    ASKS ONE QUESTION AND TOUCHES NOTHING. It used to build a whole Rsp —
+    selecting the device, setting the sample rate, enabling both streams — and
+    then close() sent iq_stream_enable=false to the SHARED server. That is a
+    live grenade, because scan.py calls this at IMPORT time (_pick_backend),
+    and six modules import scan: prove.py, tools/meter.py, tools/tune.py,
+    tools/label.py, tools/evalset.py, tools/stakeout.py. Running any of them
+    while the scanner was sweeping tore the stream out from under it.
+
+    Answering "is there an RSP attached" needs none of that. Open a socket,
+    read valid_devices, close. No device selection, no rate, no stream enables,
+    and nothing that a running scanner can notice.
+    """
     if not _server_up():
         return 0 if os.path.exists(SERVER) else None
+    probe = None
     try:
-        r = Rsp(start_server=False)
-        ok = "RSP" in (r.name or "")
-        # Do NOT let close() terminate the server. If _select_device had to
-        # recycle it, this probe now owns a freshly-working SDRconnect, and
-        # killing it here would make the real open recycle all over again —
-        # two 25 s waits to answer one question.
-        r._srv = None
-        r.close()
-        return 0 if ok else None
+        probe = object.__new__(Rsp)          # no __init__: no device, no stream
+        probe.port = WS_PORT
+        probe._buf = bytearray()
+        probe._iq = bytearray()
+        probe._srv = None
+        probe._rx = None                     # forces get() down the direct path
+        probe._connect()
+        return 0 if "RSP" in (probe.get("valid_devices") or "") else None
     except Exception:
         return None
+    finally:
+        try:
+            probe.s.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

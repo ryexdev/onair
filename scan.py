@@ -932,7 +932,13 @@ VERIFY_SLICES_PER_LAP = 5     # captures per lap, NOT channels — one capture
 # Best-ever would be a lie an hour later, so it decays: a positive verdict
 # holds for VERDICT_HOLD_S and reverts if re-checks keep coming back idle.
 VERDICT_HOLD_S = 600.0        # 10 min
-CARRYING = ("voice", "digital", "data")
+# "burst" belongs here. It was added to rescue pagers, TETRA, TPMS and key fobs
+# from being called "noise" — everything under ~a tenth of a second — and then
+# left out of CARRYING, out of the UI's carrying filter and out of the carrying
+# count, with specificity 0 so it never survived a re-check either. That moved
+# them from one label users filter away to another. A burst IS information;
+# being brief is not the same as being empty.
+CARRYING = ("voice", "digital", "data", "burst")
 # How SPECIFIC a verdict is, which is not the same as how confident it is.
 # "voice" and "digital" are identifications; "data" is kind_of's fallback for
 # "something is here and I cannot tell what". A re-check that comes back less
@@ -943,7 +949,7 @@ CARRYING = ("voice", "digital", "data")
 # was enough to relabel a live conversation "data" and hide it from the voice
 # filter. The misses are sampling noise - at 2 s windows the same capture was
 # voice 5 times out of 5.
-_RANK = {"voice": 2, "digital": 2, "data": 1}
+_RANK = {"voice": 2, "digital": 2, "data": 1, "burst": 1}
 
 
 def specificity(v):
@@ -1011,9 +1017,16 @@ class Gains:
         hot = peak > 0.85
         if not hot and peak > OVERLOAD_PEEK and ask_overload is not None:
             try:
-                hot = ask_overload()
+                answer = ask_overload()
             except Exception:
-                hot = False
+                answer = None
+            if answer is None:
+                # Could not ask. Leave the gain exactly where it is rather
+                # than guessing: treating unknown as "clean" would let the
+                # front end sit in compression whenever the link is unhealthy,
+                # which is precisely when we can least afford to be wrong.
+                return False
+            hot = answer
         if hot and i > 0:                               # overloading
             self.i[key] = i - 1
         elif peak < 0.25 and i < len(GAIN_LADDER) - 1:  # starved
@@ -1220,9 +1233,17 @@ def classify(y, rate):
         return kind_of(y, rate)           # voice | digital | data
     if flat < 0.20:
         return "tone"                     # structured but static: a spur
-    if flat < 0.80:
-        return "carrier"                  # real transmitter, nothing on it
-    return "noise"
+    # Everything reaching here ALREADY cleared pres >= 8.0 above, so it has a
+    # measured carrier — often tens of dB of one. "noise" was self-contradictory
+    # in this branch, and it was where continuous digital data landed: a
+    # well-designed digital signal demodulates to something flat AND does not
+    # vary in level, so it misses the dynamics gate too. Twelve lines up the
+    # code already admits "continuous digital streams do not vary like speech"
+    # and then gates on exactly that.
+    # "carrier" is the honest answer — a real transmitter we could not
+    # characterise — and unlike "noise" it is not the label users filter away
+    # first. Neither is in CARRYING, so nothing is promoted by this.
+    return "carrier"                      # real transmitter, nothing on it
 
 
 
@@ -1772,6 +1793,10 @@ tr td .v-tone,tr td .v-noise,tr td .v-quiet{color:#7c8794;background:#1c1f24}
 <div id=out></div>
 <script>
 var FADE=300, fsig='', saved=localStorage.getItem('off.v2');
+// ONE definition of carrying for the whole page. The filter and the count
+// each had their own copy of the list, so adding a verdict meant editing two
+// places and 'burst' was missed by both.
+var CARRYING=new Set(['voice','digital','data','burst']);
 var HID={carrying:new Set(),type:new Set(),age:new Set()};
 try{var _h=JSON.parse(localStorage.getItem('colhide')||'{}');
     for(var k in HID) (_h[k]||[]).forEach(function(v){HID[k].add(v)});}catch(e){}
@@ -1986,8 +2011,7 @@ async function tick(){
   if(!pushed){pushed=true;push();}
   filters(d.tags||{});
   var rows=d.rows.filter(function(r){return !off.has(r.tag||'(none)')});
-  if(window.ONLYD) rows=rows.filter(function(r){
-      return r.verdict=='data'||r.verdict=='voice'||r.verdict=='digital'});
+  if(window.ONLYD) rows=rows.filter(function(r){return CARRYING.has(r.verdict)});
   var pre=rows; window.PRE=pre;
   rows=rows.filter(function(r){
     return !HID.carrying.has(colVal(r,'carrying'))
@@ -1995,8 +2019,7 @@ async function tick(){
         && !HID.age.has(colVal(r,'age'));});
   document.getElementById('hdr').textContent=
     rows.length+' shown · '+rows.filter(function(r){return r.on}).length+
-    ' live now · '+d.rows.filter(function(r){return r.verdict=='voice'||
-    r.verdict=='digital'||r.verdict=='data'}).length+
+    ' live now · '+d.rows.filter(function(r){return CARRYING.has(r.verdict)}).length+
     ' carrying data · lap '+d.lap+' · '+
     (d.lap_s!=null?d.lap_s.toFixed(1):'--')+'s per lap (avg of 3)'+
     (off.size?' · '+off.size+' band(s) skipped, not scanned':'');
