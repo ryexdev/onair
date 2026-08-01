@@ -880,9 +880,22 @@ def harvest_clip(freq_hz, audio, rate, cls, by, note):
 
 
 def whisper_worker():
-    import os, subprocess, tempfile
+    """One transcriber. Several run at once, so nothing here may be shared.
+
+    Every worker used to write the SAME temp file. With one worker that was
+    harmless; the moment there were three they overwrote each other mid-flight
+    and transcribed each other's audio, filing it under their own frequency.
+    The symptom was identical text appearing on unrelated channels —
+    "additional concerns that I have." on 856.7625, 857.9875 and 858.9625 at
+    once, and the same on three ham repeaters 1.4 MHz apart.
+    Verified not to be leakage or simulcast: extracting all three from ONE
+    capture at the same instant gives r = 0.002, 0.000 and 0.017 between them,
+    i.e. genuinely different audio.
+    """
+    import os, subprocess, tempfile, threading as _th
     from prove import wav
-    tmp = os.path.join(tempfile.gettempdir(), "scan_listen.wav")
+    tmp = os.path.join(tempfile.gettempdir(),
+                       f"scan_listen_{_th.get_ident()}.wav")
     while True:
         item = None
         with _wq_lock:
@@ -930,20 +943,30 @@ def whisper_worker():
                     for k in [k for k in heard
                               if abs(k - freq_hz) <= HEARD_TOL_HZ]:
                         del heard[k]
-                    tried_nothing[round(freq_hz)] = time.time()
+                    # Count the failures rather than flagging the first one.
+                    # A listen is 1.2 s and radio voice is bursty, so hearing
+                    # nothing once means very little — the channel was probably
+                    # just between transmissions. Three empty listens on a
+                    # channel the model calls voice is worth showing; one is
+                    # noise on the board.
+                    k = round(freq_hz)
+                    prev = tried_nothing.get(k, (0, 0.0))
+                    tried_nothing[k] = (prev[0] + 1, time.time())
         except Exception:
             pass
 
 
 HEARD_TOL_HZ = 4000.0
-tried_nothing = {}            # freq -> when whisper listened and got nothing
+tried_nothing = {}            # freq -> (empty listens, when)
+DASH_AFTER = 3                # empty listens before the board says so
 
 
 def tried_recently(freq_hz, tol_hz=HEARD_TOL_HZ):
     now = time.time()
     with heard_lock:
-        for f, when in tried_nothing.items():
-            if abs(f - freq_hz) <= tol_hz and now - when < WHISPER_HOLD_S:
+        for f, (n, when) in tried_nothing.items():
+            if (abs(f - freq_hz) <= tol_hz and n >= DASH_AFTER
+                    and now - when < WHISPER_HOLD_S):
                 return True
     return False
 
@@ -1112,7 +1135,11 @@ class Schedule:
 # carrier in a short capture. Measured: NOAA voice varies 0.18 dB in 20 ms
 # (LESS than an idle carrier) but 4.2 dB over a second.
 VERIFY_SECS   = 1.2
-VERIFY_SLICES_PER_LAP = 5     # captures per lap, NOT channels — one capture
+# Raised from 5. Each slice is 1.2 s of radio time but judges EVERY channel
+# inside it and is the only place whisper gets enough audio to hear words, so
+# this number is really "how much of the board gets listened to per lap". The
+# machine has the headroom and the operator asked for it loaded up.
+VERIFY_SLICES_PER_LAP = 12    # captures per lap, NOT channels — one capture
                               # judges every confirmed channel inside it
 # A channel that has NEVER been judged is worth far more than re-checking one
 # already answered: unknown is the only state that tells you nothing. Verdicts
@@ -1413,6 +1440,18 @@ def _load_voice_model():
 
 
 VM_X, VM_Y = _load_voice_model()
+# Channels the sweep thinks are voice and that deserve a full 1.2 s capture.
+wants_ear = {}
+_voice_lock = threading.Lock()
+
+
+def wants_ear_recently(freq_hz, tol_hz=8000.0, age=120.0):
+    now = time.time()
+    with _voice_lock:
+        for f, when in wants_ear.items():
+            if abs(f - freq_hz) <= tol_hz and now - when < age:
+                return True
+    return False
 LISTEN_RATE = 48_000
 try:
     from prove import channelize as _chanl, spectrum as _fft_spectrum
@@ -2350,12 +2389,13 @@ async function tick(){
        '<td class=b>'+(r.tag||'')+'</td>'+
        '<td><div class=bar>'+(r.snr==null?'':'<i style="width:'+snr_w(r.snr)+'%;background:'+c+'"></i>')+'</div></td>'+
        '<td class=n>'+(r.snr==null?'<span class=nh>\u2014</span>':r.snr.toFixed(1)+' dB')+'</td>'+
-       '<td><span class="v v-'+(!r.verdict||r.verdict=='?'?'na':r.verdict)+(r.said?' hrd':'')+'">'+
+       '<td><span class="v v-'+(!r.verdict||r.verdict=='?'?'na':r.verdict)+((r.said&&r.said!=='\u2014')?' hrd':'')+'">'+
          (r.verdict=='?'?'\u00b7\u00b7\u00b7':r.verdict)+'</span></td>'+
        '<td class=k>'+(r.kind==='narrow'?'':r.kind)+'</td>'+
        '<td class="n age nw">'+(r.on?'LIVE':r.age==null
           ?'<span class=nh>not heard</span>':ago(Math.round(r.age/5)*5))+'</td>'+
-       '<td class=hd>'+(r.said?esc(r.said):'')+'</td>'+
+       '<td class=hd'+(r.said==='\u2014'?' style="color:#4a5058"':'')+'>'+
+         (r.said?esc(r.said):'')+'</td>'+
        '<td class=nt>'+(r.fav
          ?'<input class=note data-f="'+r.freq.toFixed(4)+'" placeholder="add a note\u2026" value="'+
           (r.note||'').replace(/"/g,'&quot;')+'">'
@@ -2827,18 +2867,15 @@ def main(argv):
                     hits = [h for h in hits if not is_spur(h["freq"], spurs)]
                     if hits or nb >= BURST_MIN:
                         sched.mark(key, lap)   # worth coming back to, for a while
-                    # AIM WHISPER FROM THE SWEEP, at whatever the voice model
-                    # flags. It used to run only inside the verify pass — five
-                    # slices per lap out of ~397 steps — so a channel got an
-                    # attempt roughly once every 79 laps. Measured: 548 runs,
-                    # 41 transcripts, 4545 gated, and only 11 of 105 voice rows
-                    # on the board carried any text. Whisper was not failing;
-                    # it was almost never pointed anywhere useful.
-                    #
-                    # The sweep already visits every channel every lap and
-                    # already holds the audio, so this costs no radio time —
-                    # only CPU, which is the thing we have spare.
-                    if hits and whisper_ok() and VM_X is not None:
+                    # FLAG voice from the sweep; do NOT try to transcribe
+                    # here. A sweep step is 16 ms of audio and whisper needs
+                    # about a second, so feeding it from here produced nothing
+                    # but dashes — one syllable fragment per channel. The sweep
+                    # cannot make more audio without spending radio time, so
+                    # instead it marks which channels are worth a real 1.2 s
+                    # look, and the verify pass (which already captures that
+                    # much) goes to them first.
+                    if hits and VM_X is not None and _chanl is not None:
                         try:
                             pre = _fft_spectrum(iq)
                             for h in hits:
@@ -2847,11 +2884,13 @@ def main(argv):
                                     continue
                                 yb = _chanl(iq, RATE, off_f, LISTEN_RATE,
                                             pre=pre)
-                                if shape_is_voice(yb, LISTEN_RATE) is not True:
-                                    continue
-                                st = surface_stats(yb, LISTEN_RATE)
-                                if st and is_really_live(st[0], st[2]):
-                                    queue_listen(h["freq"], yb, LISTEN_RATE)
+                                if shape_is_voice(yb, LISTEN_RATE) is True:
+                                    st = surface_stats(yb, LISTEN_RATE)
+                                    if st and is_really_live(st[0], st[2]):
+                                        h["looks_voice"] = True
+                                        with _voice_lock:
+                                            wants_ear[round(h["freq"])] = \
+                                                time.time()
                         except Exception:
                             pass
                     for h in hits:
@@ -2948,7 +2987,14 @@ def main(argv):
                     # looking at them. Squaring makes 42 dB outweigh 5 dB by
                     # ~70x, so density can no longer bury a strong channel,
                     # while count and waiting still break ties among equals.
-                    return (strongest ** 2) * waited * (len(ms) ** 0.5)
+                    # A slice holding a channel the VOICE MODEL flagged jumps
+                    # the queue. The sweep can spot voice but only holds 16 ms
+                    # of it, which is far too little for whisper — a full 1.2 s
+                    # capture is the only way to hear words, and this pass is
+                    # where those happen. So the model decides where the ears
+                    # go, rather than strength alone.
+                    ear = 6.0 if any(wants_ear_recently(m["freq"]) for m in ms) else 1.0
+                    return (strongest ** 2) * waited * (len(ms) ** 0.5) * ear
                 order = sorted(groups.items(), key=worth, reverse=True)
                 for center, members in order[:VERIFY_SLICES_PER_LAP]:
                     by_freq = {m["freq"]: m for m in members}
