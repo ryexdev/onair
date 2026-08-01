@@ -134,3 +134,41 @@ the entire reason for this run.
   now failed. The next attempt should not be a fifth scalar. Either compare
   whole surfaces to each other, or accept that the eye is using something we
   have not identified and go back to looking rather than measuring.
+
+- **cycle 6 — all four scorings, honestly, and the verdict is settled.**
+
+  193 rows, 76 live (47 voice, 29 digital). Everything leave-one-out:
+
+        peak                66%
+        width               56%
+        above               57%
+        all three together  63%
+        floor               57%
+
+  `width` and `above` are exactly the floor — they contribute nothing at all.
+  Combining all three is WORSE than `peak` alone, which is what happens when
+  two noise features dilute one weak one. `peak` holds a 9-point edge across
+  two cycles now (64% then 66%), so it is real, but 66% is not usable: the
+  rhythm test already in the code manages 76%.
+
+  ## Conclusion of the surface run
+
+  Six cycles, ~200 measurements, four scalars. Result:
+
+    KEEP    `is_really_live()` — above >= 8 dB AND peak < 8 kHz. It rejected
+            every noise sample tested and 22 of 30 bogus "voice" references.
+            This is a genuine contamination filter and it should guard any
+            future dataset.
+
+    DROP    peak width, height above floor, and peak frequency as classifiers.
+            All at or barely above chance when scored without fitting the
+            threshold to the answer.
+
+  The buckets3d.png surfaces really are readable by eye — the three shapes are
+  obvious and the picture caught two board mislabels instantly. Five separate
+  attempts to turn that into one number have now failed (rhythm, flatness,
+  dynamics, bandwidth, and these three). The pattern is consistent enough to
+  be the finding itself: the difference is not a scalar.
+
+  Next attempt should compare whole surfaces to each other rather than
+  summarise them, or stop measuring and go back to looking.
