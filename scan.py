@@ -18,7 +18,6 @@ Thresholds here are measured, not guessed — see tune.py.
 """
 import http.server, json, math, os, random, sys, threading, time
 import numpy as np
-import rtl
 
 # --- what to sweep --------------------------------------------------------
 # Just ranges. There is deliberately NO channel plan anywhere in this program:
@@ -32,19 +31,69 @@ BANDS = {
     "p800":   (851.0, 869.0, "800 MHz public safety"),
     "ism900": (902.0, 928.0, "900 MHz ISM — sensors, telemetry"),
     "pager":  (929.0, 932.0, "pagers"),
-    # everything the V4 tuner reaches. HF (<24 MHz) needs the rtlsdr-blog
-    # driver fork for the V4's upconverter; Homebrew ships the osmocom one.
+    "hf":     (0.5, 30.0, "HF — shortwave, ham, utility (RSP1B only)"),
+    "lband":  (1766.0, 2000.0, "L-band above the RTL-SDR ceiling (RSP1B only)"),
+    # everything the tuner reaches. The span depends on which radio is
+    # attached: the RTL-SDR V4 stops at 1766 MHz and cannot do HF without the
+    # rtlsdr-blog driver fork, while the RSP1B covers 1 kHz - 2 GHz with no
+    # gaps. FULL_SPAN below picks the right one.
     "full":   (24.0, 1766.0, "the whole tunable spectrum"),
 }
 DEFAULT_BANDS = ["vhf"]
 
 # --- radio ------------------------------------------------------------------
-RATE      = 2_400_000
-USABLE    = 0.80              # tuner rolls off at the edges of each capture
-NFFT      = 1024              # -> 2.34 kHz bins
-FRAMES    = 48                # -> ~20 ms dwell. Cost is the retune, not this.
-GAIN_DB   = 40.0
-DC_NOTCH  = 12_000            # the tuner leaks a spike at exactly centre
+#
+# Two backends, same interface (tune/read/flush/close/set_gain). The RSP1B is
+# preferred when present because it is better on every axis we measured, all
+# on the same antenna within minutes of each other:
+#
+#                     RTL-SDR V4      RSP1B
+#   usable per tune   1.92 MHz        5.10 MHz
+#   coverage          24-1766 MHz     0.1-2000 MHz
+#   retune            ~28 ms          2.9 ms
+#   ADC               8-bit           14-bit (at 6 Msps)
+#   NOAA 162.55 SNR   38.7 dB         43.0 dB
+#
+# Every constant below that depends on the radio is set from the backend
+# rather than hardcoded, because none of them transfer.
+try:
+    import rsp as _rsp
+except Exception:
+    _rsp = None
+import rtl as _rtl
+
+
+def _pick_backend():
+    if os.environ.get("ONAIR_RADIO", "").lower() == "rtl":
+        return "rtl"
+    if _rsp is not None and _rsp.find() is not None:
+        return "rsp"
+    return "rtl"
+
+
+BACKEND = _pick_backend()
+
+if BACKEND == "rsp":
+    radio = _rsp
+    RATE   = _rsp.RATE            # 6 Msps: the 14-bit native ceiling. Above
+    USABLE = _rsp.USABLE          # 6.048 Msps the ADC drops to 12/10/8 bits.
+    NFFT   = 4096                 # -> 1.46 kHz bins, finer than the RTL path
+    FRAMES = 24                   # 4096*24/6e6 = 16 ms, same dwell as before
+    GAIN_DB = 2.0                 # LNA state; 2 measured best on NOAA
+    DC_NOTCH = 12_000
+    # 1 kHz - 2 GHz, no gaps, no upconverter needed.
+    FULL_SPAN = (0.5, 2000.0)
+else:
+    radio = _rtl
+    RATE      = 2_400_000
+    USABLE    = 0.80          # tuner rolls off at the edges of each capture
+    NFFT      = 1024          # -> 2.34 kHz bins
+    FRAMES    = 48            # -> ~20 ms dwell. Cost is the retune, not this.
+    GAIN_DB   = 40.0
+    DC_NOTCH  = 12_000        # the tuner leaks a spike at exactly centre
+    FULL_SPAN = (24.0, 1766.0)
+
+BANDS["full"] = (FULL_SPAN[0], FULL_SPAN[1], "the whole tunable spectrum")
 
 # --- what counts as a signal ------------------------------------------------
 # Measured, not guessed: with the antenna disconnected AND on synthetic noise,
@@ -53,8 +102,13 @@ DC_NOTCH  = 12_000            # the tuner leaks a spike at exactly centre
 # proof of zero — 95% upper bound is ~0.04/capture — but CONFIRM_LAPS is what
 # actually rejects those: a fluke does not repeat on the same channel.)
 SNR_MIN        = 4.0          # dB above the local floor to even look at
-MIN_WIDTH_BINS = 2
-MAX_WIDTH_BINS = 128          # ~300 kHz; wider is broadband junk, not a channel
+# Width limits are expressed in HERTZ and converted to bins below. They used to
+# be bin counts, which silently meant different bandwidths on different
+# hardware: 128 bins is 300 kHz at the RTL-SDR's 2.34 kHz bins but only 187 kHz
+# at the RSP1B's 1.46 kHz bins, so the same number would have quietly narrowed
+# what counts as a channel.
+MIN_WIDTH_HZ   = 4_000        # narrower than this is a spur or a noise spike
+MAX_WIDTH_HZ   = 300_000      # wider is broadband junk, not a channel
 SCORE_MIN      = 0.50
 CONFIRM_LAPS   = 3            # must reappear this many laps to be called real
 TRACK_TOL      = 8_000        # Hz; same signal seen again
@@ -77,6 +131,13 @@ SNAP_HZ        = 2_500        # channel grid. Our bins are 2.34 kHz
 WEB_PORT       = 8701
 
 BIN_HZ = RATE / NFFT
+MIN_WIDTH_BINS = max(2, int(round(MIN_WIDTH_HZ / BIN_HZ)))
+MAX_WIDTH_BINS = max(8, int(round(MAX_WIDTH_HZ / BIN_HZ)))
+
+# The local-floor window is also in bins, and must stay wider than the widest
+# signal we accept or a wide signal sits in its own reference window and raises
+# its own floor. See local_floor().
+CFAR_GUARD_HZ = 169_000   # 72 bins on the RTL-SDR, the value validated there
 
 # --- spurs the dongle generates itself --------------------------------------
 # Measured with the antenna DISCONNECTED, so nothing here can be a real signal.
@@ -304,7 +365,7 @@ def label_for(mhz):
 # or a wide signal sits in its own reference window and raises its own floor
 # until it disappears. Simulated: with a conventional small guard a signal 20
 # bins wide masks itself completely, Pd 1.00 -> 0.01.
-CFAR_GUARD = 72               # bins each side excluded from the reference
+CFAR_GUARD = max(8, int(round(CFAR_GUARD_HZ / BIN_HZ)))   # bins each side
 CFAR_REF   = 32               # reference cells, half each side
 # The MEDIAN of the reference cells, not a higher quantile. This is the same
 # estimator the old slice-wide floor used, just measured locally — which is why
@@ -645,7 +706,9 @@ def reopen(old, rate, gain):
     except Exception:
         pass
     try:
-        return rtl.Rtl(rtl.find("R828D") or 0, rate, gain)
+        if BACKEND == "rsp":
+            return radio.Rsp(0, rate, gain)
+        return radio.Rtl(radio.find("R828D") or 0, rate, gain)
     except Exception:
         return None
 
@@ -776,7 +839,25 @@ def specificity(v):
 REVERIFY_S    = 1800.0        # 30 min before an answered channel is re-asked
 REVERIFY_IDLE_S = 240.0       # ...or 4 min, if there is spare capacity
 
-GAIN_LADDER = [16.6, 25.4, 32.8, 37.2, 40.2, 44.5, 49.6]
+# Ordered LEAST to MOST sensitive, whatever the radio calls its settings, so
+# the adapt() logic below ("index up = more gain") is the same either way.
+#
+# The RSP1B does not have a gain in dB: it has 9 LNA states where a HIGHER
+# state means MORE gain reduction, i.e. less sensitivity. Feeding those indices
+# straight into a ladder written for the RTL-SDR would have driven the gain the
+# wrong way on every adaptation. Reversed here instead, once.
+#
+# Measured on NOAA 162.5500, same antenna: state 0 is starved (0.4 dB SNR),
+# state 2 peaks at 43.0 dB, and it falls off steadily above that as gain
+# reduction trades sensitivity for headroom:
+#     state  0     1     2     3     4     5     6     7     8
+#     SNR   0.4  36.8  43.0  41.1  37.3  32.0  26.5  21.4  13.3
+if BACKEND == "rsp":
+    GAIN_LADDER = [8, 7, 6, 5, 4, 3, 2]      # least -> most sensitive
+    GAIN_START  = 6                          # index of state 2, the measured best
+else:
+    GAIN_LADDER = [16.6, 25.4, 32.8, 37.2, 40.2, 44.5, 49.6]
+    GAIN_START  = 4
 
 
 class Gains:
@@ -788,7 +869,7 @@ class Gains:
 
     def __init__(self, start=40.2):
         self.i = {}
-        self.start = GAIN_LADDER.index(start) if start in GAIN_LADDER else 4
+        self.start = GAIN_LADDER.index(start) if start in GAIN_LADDER else GAIN_START
 
     def for_step(self, key):
         return GAIN_LADDER[self.i.setdefault(key, self.start)]
@@ -2068,14 +2149,25 @@ def main(argv):
             print(f"  {n:8} {lo:7.1f}-{hi:<7.1f} {d}")
         return 1
 
-    idx = rtl.find("R828D")
-    if idx is None:
-        print("Blog V4 (R828D) not found. Attached:")
-        for i, n, t in rtl.devices():
-            print(f"  #{i} {n} [{t}]")
-        return 1
-
-    r = rtl.Rtl(idx, RATE, GAIN_DB)
+    if BACKEND == "rsp":
+        try:
+            r = radio.Rsp(0, RATE, GAIN_DB)
+        except Exception as e:
+            print(f"RSP1B present but would not open: {e}")
+            print("  Is SDRconnect (the GUI) running? Only one app can hold it.")
+            return 1
+        print(f"      {r.name}  14-bit  {RATE/1e6:.3f} Msps  "
+              f"{RATE*USABLE/1e6:.2f} MHz usable/tune")
+    else:
+        idx = radio.find("R828D")
+        if idx is None:
+            print("No radio found. Attached RTL devices:")
+            for i, n, t in radio.devices():
+                print(f"  #{i} {n} [{t}]")
+            print("  (an RSP1B needs SDRconnect installed; see "
+                  "docs/rsp1b-macos.md)")
+            return 1
+        r = radio.Rtl(idx, RATE, GAIN_DB)
     span = RATE * USABLE
     n_samp = FRAMES * NFFT
     plan = [(n, lo, hi, max(1, math.ceil((hi - lo) * 1e6 / span)))
