@@ -183,21 +183,40 @@ def syllabic(y, rate=CHAN_RATE):
 
     Speech starts and stops at roughly that rate; a steady carrier does not.
     Measured: NOAA 13.7, an ear-verified 2m voice channel 16.3, an idle
-    carrier 0.3, a pure tone -2.4."""
+    carrier 0.3, a pure tone -2.4.
+
+    BOTH DEMODULATORS, best of the two. This used to run the FM discriminator
+    only, which meant AM voice scored exactly 0.00 and read as "data" — and
+    since kind_of() asks this function, airband 118-137 and mil air 225-400
+    were structurally incapable of ever being called voice. Measured on the
+    same NOAA / 450.7250 / 145.2250 audio, AM-modulated instead of FM:
+    syllabic 0.00, kind_of "data", while metrics() on the identical signal
+    still returned flat 0.71 / dyn 3.53.
+
+    metrics() already learned this lesson (see the both-demodulators comment
+    there — "Assuming FM was a real bug: airband and military air are AM").
+    It was never applied one function down. Same rule, no new threshold: try
+    each envelope, keep the higher score. An FM signal's amplitude envelope is
+    flat by construction, so the AM branch cannot inflate an FM reading."""
     if len(y) < rate // 2:
         return 0.0
+
+    def rhythm(env):
+        k = max(int(rate // 200), 1)
+        e = env[:len(env) // k * k].reshape(-1, k).mean(axis=1)
+        e = e - e.mean()
+        if e.std() < 1e-15 or len(e) < 32:
+            return 0.0
+        E = np.abs(np.fft.rfft(e * np.hanning(len(e)))) ** 2
+        fa = np.fft.rfftfreq(len(e), 1 / 200.0)
+        lo = E[(fa >= 2.5) & (fa <= 7.0)].mean()
+        hi = E[(fa >= 25) & (fa <= 90)].mean()
+        return float(10 * np.log10(lo / (hi + 1e-30)))
+
     d = np.angle(y[1:] * np.conj(y[:-1]))
-    env = np.abs(d - np.median(d))
-    k = max(int(rate // 200), 1)
-    e = env[:len(env) // k * k].reshape(-1, k).mean(axis=1)
-    e = e - e.mean()
-    if e.std() < 1e-15 or len(e) < 32:
-        return 0.0
-    E = np.abs(np.fft.rfft(e * np.hanning(len(e)))) ** 2
-    fa = np.fft.rfftfreq(len(e), 1 / 200.0)
-    lo = E[(fa >= 2.5) & (fa <= 7.0)].mean()
-    hi = E[(fa >= 25) & (fa <= 90)].mean()
-    return float(10 * np.log10(lo / (hi + 1e-30)))
+    fm = rhythm(np.abs(d - np.median(d)))
+    am = rhythm(np.abs(y[1:]).astype(np.float64))
+    return max(fm, am)
 
 
 def kind_of(y, rate=CHAN_RATE):
