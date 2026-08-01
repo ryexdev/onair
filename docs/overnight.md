@@ -111,3 +111,26 @@ the entire reason for this run.
   Not a result. Recorded because `peak` is the only one of the three that has
   ever looked non-random, and it is worth re-checking when digital rows
   accumulate.
+
+- **cycle 5 — `peak` scored honestly: 64% against a 55% floor.**
+
+  184 rows, 71 pass the live gate (42 voice, 29 digital). This time the
+  threshold was fitted with LEAVE-ONE-OUT, so it never sees the row it is
+  scoring — which is what the previous cycles' 92% and 69% were missing.
+
+        peak, leave-one-out   64%
+        floor                 55%
+
+  A 9-point edge over guessing. Real, but small, and nowhere near the 76% the
+  rhythm test already manages or the 90% flatness reached on clips before it
+  failed in the field.
+
+  So the surface work has produced exactly one durable thing: `is_really_live()`.
+  Everything else — width, above-floor, peak — is at or near chance once
+  measured without fitting the threshold to the answer.
+
+  This is worth saying plainly for the next session: the 3D surfaces ARE
+  readable by eye, and four separate attempts to reduce them to a number have
+  now failed. The next attempt should not be a fifth scalar. Either compare
+  whole surfaces to each other, or accept that the eye is using something we
+  have not identified and go back to looking rather than measuring.
