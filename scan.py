@@ -2006,9 +2006,22 @@ async function tick(){
   FADE=d.fade||300;
   window.DEF_OFF=d.default_off||[];
   if(virgin){virgin=false;window.DEF_OFF.forEach(function(t){off.add(t)});}
-  // re-assert on every page load: the server may have restarted since, and a
-  // filter the scanner does not know about would silently cost sweep time
-  if(!pushed){pushed=true;push();}
+  // ADOPT what the server already has, then re-assert. This used to push
+  // localStorage straight over the top, which made the browser the source of
+  // truth for a setting that lives on the server: unticking a band in one tab
+  // was undone by reloading another, and any change made outside the page
+  // survived only until the next reload.
+  //
+  // Union, never replace — a band is off if EITHER side says so — so no reload
+  // can silently re-enable a band and quietly start spending sweep time on it.
+  // Re-ticking still works: that is an explicit click and it pushes at once.
+  // The re-assert stays, because the server may have restarted since and a
+  // filter the scanner does not know about would cost sweep time.
+  if(!pushed){
+    pushed=true;
+    (d.muted||[]).forEach(function(t){off.add(t)});
+    push();
+  }
   filters(d.tags||{});
   var rows=d.rows.filter(function(r){return !off.has(r.tag||'(none)')});
   if(window.ONLYD) rows=rows.filter(function(r){return CARRYING.has(r.verdict)});
