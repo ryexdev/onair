@@ -339,3 +339,45 @@ the entire reason for this run.
   The three LIVE ones are the ones worth an ear. If 506.4125 and 152.2100 sound
   like voice right now and diesel at other times, that confirms the per-capture
   point and closes out the confusion of the last three cycles.
+
+- **cycle 11 — per-CAPTURE labels: 94% on a BALANCED set, floor 51%.**
+
+  Cycle 10 concluded labels must be per-capture, not per-channel. Every clip
+  file carries its own label in its filename, so the per-capture set was
+  rebuilt from disk rather than from `ear.json`:
+
+        869 clips, 144 channels, 439 voice / 430 digital  (balanced)
+
+        channel-held-out nearest neighbour   94%
+        floor                                51%
+
+  A 43-point edge over chance, on a balanced set, never comparing a clip to
+  another clip from its own channel. The earlier 93% was against a 71% floor
+  on a set half the size that could not represent a channel carrying both.
+
+  **And the trunked hypothesis is confirmed directly: 11 channels are labelled
+  BOTH ways at different moments** — 147.2, 471.4, 482.8, 482.9, 483.2, 483.3,
+  483.5, 484.0 and others, almost all T-band. Those channels genuinely carry
+  voice sometimes and data other times, exactly as the operator's ear and the
+  scanner's readings both indicated. Neither was wrong.
+
+  That closes out cycles 8-10. There was no contamination; there was a data
+  model that could not express the truth.
+
+  ## Where this leaves the project
+
+  The approach that works: compare the whole demodulated spectrum at full
+  resolution against a library of labelled captures, nearest neighbour, and
+  label per capture rather than per channel. 94% against a 51% floor, versus
+  76% for the rhythm test currently shipping.
+
+  Still NOT implemented, deliberately. Before it ships:
+
+    1. Time it inside the sweep budget — 869 x 228 floats is one matrix
+       multiply, but measure it.
+    2. Put `is_really_live()` in front. Noise is a third class this two-way
+       test has never been shown.
+    3. Decide how the library is stored, capped and aged — it grows forever
+       as written.
+    4. Have the operator listen to `~/Desktop/onair_listen/` and confirm the
+       per-capture story on 506.4125 and 152.2100.
