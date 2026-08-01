@@ -54,8 +54,6 @@ def safe_offset(f_hz, off=OFFSET, clocks=None):
                for clk in clocks) and c > 1e6:
             return cand
     return off
-VOICE_FLAT = 0.775        # measured optimum over 174 labelled clips
-VOICE_FLAT_SOFT = 0.90    # borderline: let rhythm break the tie
 CHAN_RATE = 48_000        # baseband rate; +/-24 kHz covers any NFM channel
 
 
@@ -329,43 +327,9 @@ def kind_of(y, rate=CHAN_RATE):
             return "digital"
     kind_of.last_clock = None
 
-    # VOICE IS DECIDED BY SPECTRAL SHAPE, NOT BY RHYTHM.
-    #
-    # This asked "does the loudness pulse 3-6 times a second". Speech does.
-    # So does a data frame repeating at a few Hz — which is what an operator
-    # described as "an idling diesel" on 152.2100, a pager the scanner was
-    # calling voice. Scored against 174 clips labelled independently (whisper
-    # returning real words for voice, a hard symbol clock for digital):
-    #
-    #     rhythm  > 6.0          76%   the two distributions overlap almost
-    #                                  exactly: voice -1.8..21.0, digital
-    #                                  -1.6..22.6, and it wrongly called
-    #                                  HALF of all digital "voice"
-    #     flatness < 0.775       90%
-    #
-    # Flatness asks whether the demodulated spectrum is lumpy or smooth. Speech
-    # is lumpy — vowels and consonants put peaks in different places, and it
-    # all sits under a ~3.5 kHz ceiling a human throat cannot exceed. A digital
-    # stream is dense and even by design. Medians: voice 0.598, digital 0.946.
-    #
-    # Rhythm is kept as a WEAK second opinion, not a decider: on flatness alone
-    # the errors are channels sitting near the boundary, and a strong rhythm
-    # there is mild evidence for speech. It can no longer override a clearly
-    # machine-like spectrum, which is the whole failure being fixed.
-    #
-    # Everything else measured and rejected, all against the same 174 clips:
-    # dynamics 66%, energy above 3.5 kHz 83%, the full 24-band shape as a
-    # nearest-template match 76%, shape plus all three 86%. The binned shape
-    # loses because averaging into wide bands smooths away the fine peakiness
-    # that flatness measures.
-    flat = metrics(y, rate)[2]
-    if not np.isnan(flat):
-        if flat < VOICE_FLAT:
-            return "voice"
-        if flat < VOICE_FLAT_SOFT and syllabic(y, rate) > 6.0:
-            return "voice"
-        return "data"
-    return "voice" if syllabic(y, rate) > 6.0 else "data"
+    if syllabic(y, rate) > 6.0:
+        return "voice"
+    return "data"
 
 
 def pulses(x, rate, lo_us=20, hi_us=200):

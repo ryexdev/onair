@@ -485,92 +485,6 @@ def local_floor(avg_db):
     return np.partition(ref, CFAR_RANK - 1, axis=1)[:, CFAR_RANK - 1]
 
 
-# --- shape fingerprint -------------------------------------------------------
-# A 24-number summary of a channel's spectral shape, cheap enough to compute
-# for every hit inside every sweep step. It is NOT a verdict: it is the raw
-# material for one, accumulated across laps.
-#
-# Why in the sweep. The sweep already captures 16 ms of every channel in the
-# slice and throws it away, then a separate pass re-tunes for a 1.2 s look —
-# but only 5 slices a lap, so thousands of channels sat unjudged all night.
-# Fingerprinting where the audio already is costs no radio time and reaches
-# every channel every lap.
-#
-# Why accumulate. Measured on 120 labelled clips, matching a fingerprint built
-# from n 16 ms chunks against the same channel's full-clip fingerprint:
-#
-#     1 x 16ms  0.53      16 x 16ms  0.87
-#     2 x 16ms  0.66      32 x 16ms  0.91
-#     8 x 16ms  0.78      64 x 16ms  0.94
-#
-# One look is a coin flip; sixteen is a good fingerprint. At ~26 s a lap that
-# is about seven minutes per channel, unattended.
-#
-# Why more than two buckets. Clustering those fingerprints WITHOUT labels, the
-# natural number of shapes is about six, not two — several distinct digital
-# shapes rather than one. Forcing two buckets drops cluster purity to 68%/51%;
-# six gives 81-100%. "voice vs digital" was throwing most of the signal away.
-FP_BINS = 24
-FP_NFFT = 512
-SHAPES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "clips", "shapes.json")
-
-
-def load_shapes():
-    try:
-        d = json.load(open(SHAPES_FILE))
-        T = [(t["name"], t["class"], np.array(t["v"], dtype=np.float64))
-             for t in d["templates"]]
-        return T
-    except Exception:
-        return []
-
-
-SHAPES = load_shapes()
-FP_CHAN_RATE = 48_000
-try:
-    from prove import channelize as _chanl, spectrum as _fft_spectrum
-except Exception:                     # prove imports scan; tolerate cycles
-    _chanl = _fft_spectrum = None
-
-
-def fingerprint(y, rate):
-    """-> unit vector of FP_BINS log-power bands, or None if too short."""
-    n = (len(y) // FP_NFFT) * FP_NFFT
-    if n < FP_NFFT:
-        return None
-    w = np.abs(y[:n]).reshape(-1, FP_NFFT) if np.iscomplexobj(y) else None
-    d = np.angle(y[1:] * np.conj(y[:-1])) if np.iscomplexobj(y) else y
-    n = (len(d) // FP_NFFT) * FP_NFFT
-    if n < FP_NFFT:
-        return None
-    Z = np.abs(np.fft.rfft(d[:n].reshape(-1, FP_NFFT) * np.hanning(FP_NFFT),
-                           axis=1)) ** 2
-    tot = Z.sum(axis=1)
-    if len(tot) > 2:
-        Z = Z[tot >= np.median(tot)]        # active windows only
-    P = Z.mean(axis=0)
-    fr = np.fft.rfftfreq(FP_NFFT, 1 / rate)
-    m = (fr >= 200) & (fr < rate * 0.45)
-    P = P[m]
-    if P.size < FP_BINS:
-        return None
-    idx = np.linspace(0, len(P), FP_BINS + 1).astype(int)
-    v = np.array([10 * np.log10(P[idx[i]:idx[i + 1]].mean() + 1e-20)
-                  for i in range(FP_BINS)])
-    v = v - v.mean()
-    nr = np.linalg.norm(v)
-    return v / nr if nr > 1e-9 else None
-
-
-def shape_of(vec):
-    """Nearest template -> (name, class, similarity), or None."""
-    if vec is None or not SHAPES:
-        return None
-    best = max(SHAPES, key=lambda t: float(vec @ t[2]))
-    return best[0], best[1], float(vec @ best[2])
-
-
 def analyse(iq, center):
     """One capture -> list of candidate signals with a structure score."""
     n = (len(iq) // NFFT) * NFFT
@@ -806,7 +720,6 @@ CLOCK_SURE_DB = 24.0
 VOICE_HARVEST_MAX = 40        # per channel per run; ground truth, not a log
 
 _harvested = {}
-_ear_lock = threading.Lock()
 
 
 def harvest_clip(freq_hz, audio, rate, cls, by, note):
@@ -846,24 +759,14 @@ def harvest_clip(freq_hz, audio, rate, cls, by, note):
         with wave.open(os.path.join(d, name), "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(int(rate))
             w.writeframes((a * 32767).astype("<i2").tobytes())
-        # Atomic, and under a lock. The first version read-modify-wrote this
-        # file from the whisper thread and the verify pool at once, and
-        # open(p,"w") truncates IMMEDIATELY — so one writer could read the
-        # empty file mid-truncate, fall into its except, and write back a dict
-        # holding a single entry. That silently destroyed 119 labels down to
-        # 13. Write a temp file and rename, which is atomic on POSIX.
         p = os.path.join(d, "ear.json")
-        with _ear_lock:
-            try:
-                ear = json.load(open(p))
-            except Exception:
-                ear = {}
-            ear[f"{mhz:.4f}"] = {"class": cls, "by": by,
-                                 "heard": txt[:120], "clip": name}
-            tmp = p + ".tmp"
-            with open(tmp, "w") as fh:
-                json.dump(ear, fh, indent=1)
-            os.replace(tmp, p)
+        try:
+            ear = json.load(open(p))
+        except Exception:
+            ear = {}
+        ear[f"{mhz:.4f}"] = {"class": cls, "by": by,
+                             "heard": txt[:120], "clip": name}
+        json.dump(ear, open(p, "w"), indent=1)
     except Exception:
         pass                      # ground truth is a bonus, never a blocker
 
@@ -927,61 +830,15 @@ def heard_recently(freq_hz, tol_hz=HEARD_TOL_HZ):
     return None
 
 
-HIST_LOOKS = 8                # verdicts remembered per channel
-
-
-def decide(hist):
-    """A verdict from several looks, not from the latest one.
-
-    One 1.2 s look at a bursty channel is a statement about timing as much as
-    about the channel. 507.3125 read voice three times and then digital twice,
-    minutes apart, and both were honest measurements.
-
-    Two rules, and the order matters:
-
-      ANY-EVIDENCE first. A strong symbol clock is PROOF — 4800 Hz to the baud
-      is not something that happens by luck — and its absence in a given look
-      proves nothing, since the channel may simply have been idle. So one
-      certain sighting outranks any number of silences. This is also the only
-      thing that can catch a rare event: an ADS-B blast in fifty looks would be
-      voted away by any majority rule.
-
-      MAJORITY second. With no proof either way, take what the looks mostly
-      said rather than what the last one happened to say. Ties go to the more
-      specific answer.
-
-    Deliberately NOT an average of the measurements. That was tested on six
-    ear-labelled channels and did nothing: 5.3 -> 5.1, 17.6 -> 18.0,
-    14.4 -> 13.8 dB. Averaging removes randomness, and the looks were not
-    random — they agreed with each other. What varies is the traffic, not the
-    measurement, and voting is the right tool for that.
-    """
-    if not hist:
-        return None, 0
-    for _v, ck in hist:
-        if ck and ck[0] >= CLOCK_SURE_DB:
-            return "digital", sum(1 for v, _ in hist if v == "digital")
-    votes = {}
-    for v, _ck in hist:
-        votes[v] = votes.get(v, 0) + 1
-    best = max(votes.items(), key=lambda kv: (kv[1], specificity(kv[0])))
-    return best[0], best[1]
-
-
 def apply_verdicts(res, by_freq, t0, tag=""):
     """Write verify results onto tracks. Shared by the deferred pass and the
     mid-lap strike so the two cannot drift apart."""
-    for f, v, ck in res:
+    for f, v in res:
         m = by_freq.get(f)
         if m is None:
             continue
         was = m.get("verdict")
         now2 = time.time()
-        h = m.setdefault("hist", [])
-        h.append((v, ck))
-        del h[:-HIST_LOOKS]
-        v, agree = decide(h)
-        m["looks"], m["agree"] = len(h), agree
         # keep the more specific answer while it is still fresh
         if (specificity(v) < specificity(was)
                 and now2 - m.get("vpos", 0.0) < VERDICT_HOLD_S):
@@ -1347,7 +1204,7 @@ def verify_slice(r, center_hz, freqs, pool, also_listen=()):
                     queue_listen(f, y, CHAN_RATE)
                 else:
                     listen_stats["gated"] += 1
-            return f, v, getattr(kind_of_ref, "last_clock", None)
+            return f, v
         except Exception:
             # Swallowing this hid a real crash for a long time: kind_of raised
             # IndexError on any capture that was not a whole number of 0.1 s
@@ -1469,29 +1326,6 @@ def classify(y, rate):
 
 
 
-def _accumulate_shape(m, fp):
-    """Running mean of a channel's fingerprint, plus its nearest template.
-
-    A single 16 ms look matches a channel's true shape only 0.53; sixteen
-    looks reach 0.87 and thirty-two 0.91. So the value here is not any one
-    fingerprint but the average, which is why this is stored per channel and
-    updated every lap rather than recomputed from the latest capture.
-
-    Kept entirely OUT of the verdict path on purpose — this is being measured
-    against the existing classifier, not replacing it yet.
-    """
-    if fp is None:
-        return
-    n = m.get("fp_n", 0)
-    acc = m.get("fp_acc")
-    acc = fp.copy() if acc is None else acc + fp
-    m["fp_acc"], m["fp_n"] = acc, n + 1
-    v = acc / (np.linalg.norm(acc) + 1e-9)
-    got = shape_of(v)
-    if got:
-        m["shape"], m["shape_cls"], m["shape_sim"] = got
-
-
 class Tracker:
     """Remembers signals across laps. Confirmation and 'is anyone actually
     using it' both live here, because both are questions about TIME."""
@@ -1547,18 +1381,15 @@ class Tracker:
                 # ADS-B is a burst AND a wide lift. Overwriting made the label
                 # flip lap to lap, so collect them instead.
                 m.setdefault("kinds", set()).add(h.get("kind", "narrow"))
-                _accumulate_shape(m, h.get("fp"))
                 if not m["announced"] and m["laps"] >= CONFIRM_LAPS \
                         and m["score"] >= SCORE_MIN:
                     m["announced"] = True
                     yield "NEW", m
             else:
-                _fp0 = h.pop("fp", None)
                 m = {**h, "kinds": {h.get("kind", "narrow")},
                      "first": now, "last": now, "since": now,
                      "laps": 1, "first_lap": lap, "last_lap": lap,
                      "announced": False}
-                _accumulate_shape(m, _fp0)
                 self.t.append(m)
                 self._index(m)
 
@@ -1843,10 +1674,6 @@ def publish(tr, lap, t0, bands):
                      "pattern": pattern(m, lap),
                      "tag": label_for(key / 1e6),
                      "verdict": m.get("verdict", "?"),
-                     # measured alongside the verdict, not used by it
-                     "shape": m.get("shape"), "shape_n": m.get("fp_n", 0),
-                     "shape_sim": (round(m["shape_sim"], 3)
-                                   if m.get("shape_sim") is not None else None),
                      "kind": "+".join(sorted(m.get("kinds",
                                                     {m.get("kind","narrow")})))})
     apply_heard(rows)
@@ -2787,23 +2614,6 @@ def main(argv):
                     for h in hits:
                         h["band"] = name
                         h.setdefault("kind", "narrow")
-                    # FINGERPRINT EVERY HIT, from the capture already in hand.
-                    # One 16 ms look is a coin flip (0.53 match to a channel's
-                    # true shape); the point is that it happens EVERY lap for
-                    # EVERY channel, so it converges — 0.87 by sixteen looks.
-                    # Costs no radio time and one FFT for the whole slice.
-                    if SHAPES and hits:
-                        try:
-                            pre = _fft_spectrum(iq)
-                            for h in hits:
-                                off_f = h["freq"] - center
-                                if abs(off_f) > RATE * 0.45:
-                                    continue
-                                yb = _chanl(iq, RATE, off_f, FP_CHAN_RATE,
-                                            pre=pre)
-                                h["fp"] = fingerprint(yb, FP_CHAN_RATE)
-                        except Exception:
-                            pass
                     now = time.time()
                     for kind, m in tr.update(hits, lap, now):
                         print(f"[{now-t0:6.1f}s] NEW   {m['freq']/1e6:10.4f} MHz"
