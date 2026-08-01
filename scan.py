@@ -110,14 +110,36 @@ SNR_MIN        = 4.0          # dB above the local floor to even look at
 MIN_WIDTH_HZ   = 4_000        # narrower than this is a spur or a noise spike
 MAX_WIDTH_HZ   = 300_000      # wider is broadband junk, not a channel
 SCORE_MIN      = 0.50
-CONFIRM_LAPS   = 3            # must reappear this many laps to be called real
+CONFIRM_LAPS   = 2            # must reappear this many laps to be called real
+# 3 was costing the channels this program exists to find. A step is sampled for
+# 16 ms once per ~39 s lap, so P(sighting per lap) is roughly the duty cycle,
+# and needing THREE sightings before UNCONFIRMED_S expires is a compound bet
+# against anything intermittent. Monte-Carlo of the real Schedule/Tracker rules
+# on a cold step, median time to confirm and the share confirmed within 43 h:
+#
+#     duty    600s/3        3600s/3       3600s/2
+#      5%     187 min        fast          fast
+#      2%      18 h (60%)    9.5 h (98%)   5.5 h (100%)
+#      1%      37 h (18%)     27 h (56%)    15 h ( 95%)
+#    0.5%        - ( 2%)        - ( 9%)      27 h ( 56%)
+#
+# That band — a channel used a couple of times an hour — is most business,
+# ham, GMRS and fire/EMS tactical traffic. It was effectively invisible.
+# The false positives 3 was guarding against are already handled better by the
+# per-lap +/-100 kHz jitter, which moves a tuner spur and leaves a real signal
+# where it is; persistence was never the thing catching those.
 TRACK_TOL      = 8_000        # Hz; same signal seen again
 FORGET_S       = 3_600.0      # confirmed signals: forgotten an hour after
                               # they were last heard
-UNCONFIRMED_S  = 600.0        # a candidate that appeared once and never came
-                              # back within 10 min was noise. Dropping these
+UNCONFIRMED_S  = 3_600.0      # a candidate that appeared once and never came
+                              # back within an HOUR was noise. Dropping these
                               # keeps memory flat: they are ~60% of all tracks
                               # and none of them ever become anything.
+                              # Was 600 s, which is only ~15 laps — a channel
+                              # used twice an hour had its count reset before
+                              # it could ever reach CONFIRM_LAPS. See the
+                              # table above: this is the other half of that
+                              # change and the two only work together.
 FADE_S         = 300.0        # green -> grey over 5 minutes
 # 2.5 kHz, not 12.5. Every raster actually in use divides evenly into 2.5 —
 # 5 (ham tuning steps), 12.5 and 6.25 (land mobile, GMRS), 15 and 20 (2 m
@@ -490,9 +512,23 @@ def analyse(iq, center):
         while j + 1 < n_bins and hot[j + 1]:
             j += 1
         width = j - i + 1
-        # a group touching the usable edge is probably clipped; the neighbouring
-        # step covers it properly
-        if valid[max(i - 1, 0)] and valid[min(j + 1, n_bins - 1)]:
+        # A group touching the usable EDGE is probably clipped, so let the
+        # neighbouring step have it. Test `usable`, not `valid` — `valid` also
+        # excludes the DC notch, so a group merely ADJACENT to the notch was
+        # being thrown away as if it were clipped at the capture edge. It is
+        # not: DC is a hole in the middle, with good spectrum on both sides.
+        #
+        # The notch is 24 kHz wide; that mistake made the blind zone 50 kHz.
+        # Bench, a strong NBFM carrier stepped away from the centre, 5 trials:
+        #
+        #     offset kHz   0    5   10   14   18   22   26   30
+        #     before      0/5  0/5  0/5  0/5  0/5  0/5  5/5  5/5
+        #     after       0/5  0/5  5/5  5/5  5/5  5/5  5/5  5/5
+        #
+        # ~1% of the spectrum was invisible on any given lap, and any channel
+        # within 125 kHz of a step centre lost roughly a quarter of its laps,
+        # since the per-lap jitter is only +/-100 kHz.
+        if usable[max(i - 1, 0)] and usable[min(j + 1, n_bins - 1)]:
             peak = i + int(np.argmax(avg_db[i:j + 1]))
             hits.append(_score(peak, i, j, width, avg_db, frame_db,
                                float(floor_b[peak]), bin_f, center, valid))
@@ -2302,8 +2338,25 @@ def main(argv):
             return 1
         r = radio.Rtl(idx, RATE, GAIN_DB)
     span = RATE * USABLE
+    # OVERLAP the steps. `span` is the usable width of one capture, and it was
+    # also being used as the step SPACING, so consecutive usable windows abutted
+    # exactly with nothing to spare. The comment in analyse() says a group
+    # clipped at the edge is fine because "the neighbouring step covers it
+    # properly" — with zero overlap that is simply false. A channel sitting on
+    # a seam is at the top edge of step k AND the bottom edge of step k+1, and
+    # the edge test drops it in BOTH. 392 seams across 0.5-2000 MHz.
+    #
+    # Bench, strong NBFM stepped in from the usable edge, 5 trials each:
+    #
+    #     inside edge by   60k   40k   20k   10k    5k    0
+    #     detected         5/5   5/5   5/5   0/5   0/5   0/5
+    #
+    # 60 kHz of overlap covers that with margin. Costs 5 extra steps out of
+    # 393, about half a second a lap.
+    STEP_OVERLAP = 60_000
+    step = span - STEP_OVERLAP
     n_samp = FRAMES * NFFT
-    plan = [(n, lo, hi, max(1, math.ceil((hi - lo) * 1e6 / span)))
+    plan = [(n, lo, hi, max(1, math.ceil((hi - lo) * 1e6 / step)))
             for n, lo, hi in targets]
     steps = sum(p[3] for p in plan)
     mhz = sum(hi - lo for _, lo, hi, _ in plan)
@@ -2377,9 +2430,9 @@ def main(argv):
             lap_levels = []
             for name, low, high, nsteps in plan:
                 for k in range(nsteps):
-                    center = low * 1e6 + span * (k + 0.5) + jitter
+                    center = low * 1e6 + step * (k + 0.5) + jitter
                     key = (name, k)
-                    if is_muted((low * 1e6 + span * (k + 0.5)) / 1e6):
+                    if is_muted((low * 1e6 + step * (k + 0.5)) / 1e6):
                         continue          # unticked: do not spend radio time
                     if not sched.due(key, lap):
                         continue
