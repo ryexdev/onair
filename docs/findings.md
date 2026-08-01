@@ -5,13 +5,19 @@ hardware) after the RSP1B port, 2026-07-31. Ranked by mission impact:
 *find frequencies carrying information someone could actually use*.
 
 `V` = verified by measurement or bench. `S` = suspected, not confirmed.
-Nothing here is fixed yet.
+`[x] DONE` items are fixed and pushed.
+
+Not from the reviews, found while working and fixed: the scanner exited with
+"No radio found" when SDRconnect lost the device, and `reopen()` closed the old
+radio before a single rebuild attempt, so one failure left the sweep holding a
+dead socket and killed the board with a Bad-file-descriptor traceback. Both now
+recover.
 
 ---
 
 ## P1 — wrong answers about real traffic
 
-- [ ] **V — AM voice can never read `voice`.** `syllabic()` prove.py:180 and
+- [x] DONE — **V — AM voice can never read `voice`.** `syllabic()` prove.py:180 and
   `kind_of()` prove.py:209 use the FM discriminator only. The same NOAA audio
   AM-modulated scores rhythm **0.00** and reads `data`. Airband 118-137 and mil
   air 225-400 are structurally incapable of being called voice.
@@ -19,7 +25,7 @@ Nothing here is fixed yet.
   `metrics()` already tries both demodulators (prove.py:115-128) — apply the
   same rule one function down. No new threshold.
 
-- [ ] **V — ~5.5% of verdicts are computed on the wrong spectrum.**
+- [x] DONE — **V — ~5.5% of verdicts are computed on the wrong spectrum.**
   `verify_slice` scan.py:946-952 walks `tune_at` **monotonically +500 kHz** to
   dodge clocks; `channelize`'s `idx % n` (prove.py:75) then wraps past Nyquist
   **silently**. Over 908 slice centres: 89 shift twice, putting the slice
@@ -131,7 +137,7 @@ Nothing here is fixed yet.
   gives it specificity 0 (scan.py:848) so it never survives a re-check.
   *Fix:* add to `CARRYING` and `_RANK` at 1.
 
-- [ ] **V — `verify_slice` hardcodes the RTL-SDR's combs.** scan.py:964-970
+- [x] DONE — **V — `verify_slice` hardcodes the RTL-SDR's combs.** scan.py:964-970
   walks away from 28.8/12/27 MHz literals while `CLOCKS_HZ` exists for this.
   ~12% of slices get displaced up to 2.3 MHz, pushing channels onto the IF
   filter corner (-5.8 dB at 2.7 MHz) so they return `quiet`.
