@@ -1,5 +1,33 @@
 # Review findings
 
+**Where this stands — 11 done, 16 open.** Ranked by how much it affects what
+you actually see, against what it costs to fix. That is deliberately NOT the
+same axis the sections below use: those are grouped by KIND of wrongness, which
+is why an item can sit in P1 and still be worth skipping. Trust this table for
+what to do next; use the sections for the evidence behind each item.
+
+| # | item | cost |
+|---|------|------|
+| 1 | Pagers read `voice` — the bursty clock test fails (152.2100) | medium, needs clip validation |
+| 2 | Real voice reads `digital` on an exact 8 kHz line — whisper masks it | unknown, cause not identified |
+| 3 | Prominence guard still in BINS not Hz — depresses genuine narrowband | faithful port |
+| 4 | Anything over ~16 kHz unclassifiable — 25 kHz FM, TETRA, trunked | large |
+| 5 | `spurs_rsp.json` cannot be produced — nothing writes it | small + antenna-off run |
+| 6 | Band mode still slices at 1.9 MHz — sweep-only, band mode is unused | one number |
+| 7 | Dense rasters merge — two channels 12.5 kHz apart read as one | medium |
+| 8 | CFAR annulus sits on neighbours at 200 kHz — 2/9 found vs 8/9 at 400 kHz | one constant |
+| 9 | Signals on under 15% of a capture score below `SCORE_MIN` | narrow class |
+| 10 | RTL-only: `SPUR_TOL_HZ` blanks 10.9 MHz — not active on this hardware | n/a |
+| 11-16 | Six SUSPECTED gain/timing items — measure before changing anything | measure first |
+
+Only #1 affects the board day to day. #3 and #8 are cheap and would find more
+channels. #4 and below are large, irrelevant to the sweep, or need measurement.
+
+**Corrected, no action:** a false-positive `voice` CAN be retired — see the note
+in P3. **Do not chase:** 406.125 rhythm shape, 161.6875. Both have the evidence
+written up at the bottom.
+
+---
 Three independent reviews of the base logic (coverage, fingerprinting,
 hardware) after the RSP1B port, 2026-07-31. Ranked by mission impact:
 *find frequencies carrying information someone could actually use*.
