@@ -747,23 +747,48 @@ def apply_verdicts(res, by_freq, t0, tag=""):
                   f"{f/1e6:10.4f} MHz  {label_for(f/1e6)}", flush=True)
 
 
-def reopen(old, rate, gain):
-    """Rebuild the radio after a USB failure. Returns a new Rtl, or None.
+def reopen(old, rate, gain, tries=6):
+    """Rebuild the radio after a USB failure. Returns a new radio, or None.
 
     Unplugging the dongle used to kill the process outright: rtl.read raises
     RuntimeError, nothing catches it, and the whole board is lost. Replugging
     is a thing people do, so recover instead of dying.
+
+    KEEP TRYING. One attempt was not enough, and the failure was ugly: the old
+    radio is closed FIRST, so a single failed rebuild returned None while the
+    caller still held a shut socket, and the next step died on
+    `OSError: [Errno 9] Bad file descriptor` — a traceback that names
+    set_gain and says nothing about the radio having gone. Observed killing
+    the board outright.
+
+    On the RSP1B one attempt is especially not enough, because the rebuild is
+    exactly where the device gets recovered: Rsp() restarts SDRconnect when it
+    has lost the hardware, and that takes ~20 s. Backing off and retrying
+    turns a fatal crash into a pause.
     """
+    try:
+        # Do NOT terminate the server here. Rsp() decides whether SDRconnect
+        # needs recycling; killing it blind just adds a 25 s cold start to
+        # every attempt, including the attempts that were going to work.
+        old._srv = None
+    except Exception:
+        pass
     try:
         old.close()
     except Exception:
         pass
-    try:
-        if BACKEND == "rsp":
-            return radio.Rsp(0, rate, gain)
-        return radio.Rtl(radio.find("R828D") or 0, rate, gain)
-    except Exception:
-        return None
+    for i in range(tries):
+        try:
+            if BACKEND == "rsp":
+                return radio.Rsp(0, rate, gain)
+            return radio.Rtl(radio.find("R828D") or 0, rate, gain)
+        except Exception as e:
+            if i == tries - 1:
+                print(f"  [radio] rebuild failed after {tries} tries: {e!r}",
+                      flush=True)
+                return None
+            time.sleep(min(3.0 * (i + 1), 15.0))
+    return None
 
 
 def bursts(iq, lo_us=10.0, hi_us=400.0):
@@ -1017,19 +1042,37 @@ def verify_slice(r, center_hz, freqs, pool, also_listen=()):
                 return f, None
             y = channelize(iq, RATE, off_f, CHAN_RATE, pre=spec)
             v = classify(y, CHAN_RATE)
-            # Anything with a carrier is a listening candidate — not just the
-            # ones we already called voice. The point is to find speech the
-            # structural test MISSED (morse-like scoring, AM through an FM
-            # discriminator, weak signals), so "data", "carrier", "tone" and
-            # "burst" are exactly the interesting cases. "quiet" and "noise"
-            # have nothing to listen to.
-            # Only ask whisper about signals strong enough to actually be
-            # speech. Below this it transcribes noise and invents sentences:
-            # every hallucination so far ("We also have that", "So a lot of
-            # people", a musical-note one) came from 4.7-11.1 dB, and every
-            # correct confirmation from 17-18 dB. Word count cannot separate
-            # them — real transmissions are short too — but level can.
-            if listening and v not in ("quiet", "noise"):
+            # LEVEL decides whether to listen, never the verdict.
+            #
+            # This used to skip "quiet" and "noise" on the reasoning that they
+            # have nothing to listen to. That is circular, and it locks in the
+            # exact mistakes whisper exists to catch: the verdict silences the
+            # only thing that could revise it. 448.0600 is a 70cm repeater with
+            # people talking on it continuously, and it sat on the board as
+            # quiet with no transcript for hours.
+            #
+            # It is a repeater, so its carrier is up constantly and its
+            # loudness barely varies — dynamics measured 0.21-1.52 against a
+            # 0.70 gate — which leaves the verdict riding entirely on the
+            # rhythm score. Measured across four captures of the same channel
+            # in the same minute, presence a steady ~30 dB throughout:
+            #
+            #     dyn 0.65  syllabic 19.9  -> voice
+            #     dyn 0.43  syllabic  5.8  -> carrier
+            #     dyn 0.21  syllabic  6.2  -> voice
+            #     dyn 0.43  syllabic 22.6  -> voice
+            #
+            # 5.8 against a threshold of 6.0. One unlucky capture and whisper
+            # was switched off for that channel permanently.
+            #
+            # The presence floor below already does the job the verdict test
+            # was pretending to do. Only ask whisper about signals strong
+            # enough to actually be speech: every hallucination so far ("We
+            # also have that", "So a lot of people", a musical-note one) came
+            # from 4.7-11.1 dB, and every correct confirmation from 17-18 dB.
+            # Word count cannot separate them — real transmissions are short
+            # too — but level can. 448.0600 clears it at 30 dB.
+            if listening:
                 pres = metrics(y, CHAN_RATE)[4]
                 if not np.isnan(pres) and pres >= LISTEN_MIN_PRES:
                     queue_listen(f, y, CHAN_RATE)
@@ -2354,10 +2397,16 @@ def main(argv):
                         print(f"  [radio] {e} ({usb_fail}) — reopening",
                               flush=True)
                         time.sleep(min(2.0 * usb_fail, 10.0))
-                        nr = reopen(r, RATE, g_db)
-                        if nr is not None:
-                            r, usb_fail = nr, 0
-                            print("  [radio] back", flush=True)
+                        # Loop until it comes back. `r` is already closed by
+                        # now, so falling through with the old object is what
+                        # produced the Bad-file-descriptor crash that killed
+                        # the board. reopen() backs off internally, so waiting
+                        # here for a replug costs nothing.
+                        nr = None
+                        while nr is None:
+                            nr = reopen(r, RATE, g_db)
+                        r, usb_fail = nr, 0
+                        print("  [radio] back", flush=True)
                         continue
                     usb_fail = 0
                     gains.adapt(key, iq, getattr(r, "overloaded", None))
