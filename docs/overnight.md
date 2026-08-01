@@ -86,3 +86,28 @@ the entire reason for this run.
   eye, but every scalar taken off them so far behaves like noise. Either the
   information is in something these three do not capture, or the sample is
   still too small at 20 voice. Keep collecting; do not build.
+
+- **cycle 4 — `peak` is the only number showing anything, and the sample is
+  badly imbalanced.**
+
+  175 rows. Restricting to HARVESTED live rows only (no hand-picked reference
+  captures, which bias toward channels I chose): 31 voice, 7 digital.
+
+        width  voice 375  digital 281   84%
+        above  voice  14  digital  11   82%
+        peak   voice 562  digital 4781  92%
+        floor (always guess voice)      82%
+
+  Voice concentrates its peak near 560 Hz; digital sits up around 4.8 kHz. On
+  harvested rows that is a 10-point edge over guessing.
+
+  BUT: 7 digital rows, and the class balance flipped from the last cycle
+  (28 digital / 20 voice then, 7 / 31 now), which by itself moves the floor
+  from 58% to 82%. On ALL live rows including the direct captures, the same
+  `peak` measure scored 65%. Two very different answers from the same feature
+  depending on which rows are included is the signature of a sample too small
+  to mean anything.
+
+  Not a result. Recorded because `peak` is the only one of the three that has
+  ever looked non-random, and it is worth re-checking when digital rows
+  accumulate.
