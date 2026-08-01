@@ -646,7 +646,14 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "models/ggml-small.en.bin")
 # only a backstop for a channel we never manage to hear again — it matches
 # FORGET_S, the point at which the track itself is dropped.
 WHISPER_HOLD_S = 3600.0
-WHISPER_QUEUE = 16            # bounded: drop the oldest rather than lag behind
+# Bounded, dropping the OLDEST first: stale audio is worth less than fresh, so
+# a backlog sheds history instead of falling behind the radio. Raised from 16
+# because whisper is now aimed at every channel the voice model flags rather
+# than at whatever happened to land in a verify slice. If it ever cannot keep
+# up, the answer is a smaller whisper model, not a smaller queue — a dropped
+# clip is a channel nobody listened to.
+WHISPER_QUEUE = 96
+WHISPER_WORKERS = 3           # transcription is the bottleneck, not the radio
 # Whisper's own non-speech annotations, plus the music marker. "\u266a The car
 # is not a sweater \u266a" came back from a 4.8 dB channel that is silent on a
 # handheld — the note characters were not in the original pattern, so it passed.
@@ -912,15 +919,33 @@ def whisper_worker():
             else:
                 # Listened and heard nothing. THAT is what retires a
                 # transcript — evidence, not the passage of time.
+                #
+                # Also REMEMBER that we tried. A blank HEARD column cannot
+                # distinguish "whisper listened and there were no words" from
+                # "whisper has never been pointed at this channel", and those
+                # mean opposite things: the first is evidence the row is not
+                # voice, the second is evidence of nothing at all. The board
+                # shows a dash for the first.
                 with heard_lock:
                     for k in [k for k in heard
                               if abs(k - freq_hz) <= HEARD_TOL_HZ]:
                         del heard[k]
+                    tried_nothing[round(freq_hz)] = time.time()
         except Exception:
             pass
 
 
 HEARD_TOL_HZ = 4000.0
+tried_nothing = {}            # freq -> when whisper listened and got nothing
+
+
+def tried_recently(freq_hz, tol_hz=HEARD_TOL_HZ):
+    now = time.time()
+    with heard_lock:
+        for f, when in tried_nothing.items():
+            if abs(f - freq_hz) <= tol_hz and now - when < WHISPER_HOLD_S:
+                return True
+    return False
 
 
 def heard_recently(freq_hz, tol_hz=HEARD_TOL_HZ):
@@ -1352,6 +1377,81 @@ def syllabic(y, rate):
     return _s(y, rate)
 
 
+# --- the voice model ---------------------------------------------------------
+# Voice is decided by comparing a channel's whole spectrum against a library of
+# captures whose answer is known, nearest match wins. NOT by scoring it with a
+# number.
+#
+# Eight single numbers were tried and measured against the operator's ear:
+# rhythm, flatness, dynamics, energy above 3.5 kHz, peak width, peak height,
+# peak position, and a 24-band fingerprint. The best honest result was 76% and
+# one of them shipped and had to be reverted within the hour. Every one of them
+# collapses the spectrum to a scalar, and the difference between a person and a
+# machine does not survive that.
+#
+# Scored on 168 clips the operator labelled BY EAR, across 51 channels, never
+# comparing a clip to another from its own channel:
+#
+#     shape match                       97%
+#     always guess the bigger class     74%
+#     rhythm test this replaces         76%
+#
+# The library leads with ear labels and falls back to the automatic ones
+# (whisper heard real words -> voice; a symbol clock over 24 dB -> not voice),
+# both of which the operator's ear agreed with 88 times out of 90.
+VOICE_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "clips", "voice_model.npz")
+VOICE_SIM_MIN = 0.55          # below this the library has nothing like it
+
+
+def _load_voice_model():
+    try:
+        d = np.load(VOICE_MODEL)
+        return d["X"].astype(np.float32), d["Y"].astype(np.int8)
+    except Exception:
+        return None, None
+
+
+VM_X, VM_Y = _load_voice_model()
+LISTEN_RATE = 48_000
+try:
+    from prove import channelize as _chanl, spectrum as _fft_spectrum
+except Exception:
+    _chanl = _fft_spectrum = None
+
+
+def shape_vector(y, rate):
+    """The channel's spectral shape, unit length. Must match the builder."""
+    d = np.angle(y[1:] * np.conj(y[:-1]))
+    n = (len(d) // SURF_NFFT) * SURF_NFFT
+    if n < SURF_NFFT * 4:
+        return None
+    P = np.abs(np.fft.rfft(d[:n].reshape(-1, SURF_NFFT) * np.hanning(SURF_NFFT),
+                           axis=1)) ** 2
+    M = 10 * np.log10(P.mean(axis=0) + 1e-20)
+    fr = np.fft.rfftfreq(SURF_NFFT, 1 / rate)
+    b = (fr >= 200) & (fr < rate * 0.45)
+    if b.sum() < 32:
+        return None
+    M = M[b] - M[b].mean()
+    nr = np.linalg.norm(M)
+    return (M / nr).astype(np.float32) if nr > 1e-9 else None
+
+
+def shape_is_voice(y, rate):
+    """-> True / False / None (no opinion). One matrix multiply."""
+    if VM_X is None:
+        return None
+    v = shape_vector(y, rate)
+    if v is None or v.shape[0] != VM_X.shape[1]:
+        return None
+    sims = VM_X @ v
+    j = int(np.argmax(sims))
+    if float(sims[j]) < VOICE_SIM_MIN:
+        return None                     # nothing in the library resembles it
+    return bool(VM_Y[j])
+
+
 def classify(y, rate):
     """Is INFORMATION being carried here?
 
@@ -1410,7 +1510,17 @@ def classify(y, rate):
         # rhythm alone qualifies: two ear-confirmed 2m voice channels had
         # featureless spectra (flatness 0.96 and 0.67) and the flatness gate
         # would have thrown both away
-        return kind_of(y, rate)           # voice | digital | data
+        # kind_of still decides digital-vs-data from the symbol clock, which
+        # works. Only its VOICE branch is replaced, because that branch is the
+        # rhythm test and rhythm cannot tell a talking person from a data frame
+        # repeating a few times a second.
+        v = kind_of(y, rate)
+        sv = shape_is_voice(y, rate)
+        if sv is True and v != "digital":
+            return "voice"
+        if sv is False and v == "voice":
+            return "data"
+        return v
     if flat < 0.20:
         return "tone"                     # structured but static: a spur
     # Everything reaching here ALREADY cleared pres >= 8.0 above, so it has a
@@ -1704,6 +1814,8 @@ def apply_heard(rows):
         txt = heard_recently(r["freq"] * 1e6)
         if txt:
             r["verdict"], r["said"] = "voice", txt
+        elif tried_recently(r["freq"] * 1e6):
+            r["said"] = "\u2014"        # listened, no words. Not the same as untried.
 
 
 def attach_bookmarks(rows):
@@ -2611,7 +2723,8 @@ def main(argv):
     # pool(8) 25, pool(12) 26.
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
     if whisper_ok():
-        threading.Thread(target=whisper_worker, daemon=True).start()
+        for _ in range(WHISPER_WORKERS):
+            threading.Thread(target=whisper_worker, daemon=True).start()
         print("      listening for speech in the background (whisper, "
               "off the radio's path)")
     else:
@@ -2714,6 +2827,33 @@ def main(argv):
                     hits = [h for h in hits if not is_spur(h["freq"], spurs)]
                     if hits or nb >= BURST_MIN:
                         sched.mark(key, lap)   # worth coming back to, for a while
+                    # AIM WHISPER FROM THE SWEEP, at whatever the voice model
+                    # flags. It used to run only inside the verify pass — five
+                    # slices per lap out of ~397 steps — so a channel got an
+                    # attempt roughly once every 79 laps. Measured: 548 runs,
+                    # 41 transcripts, 4545 gated, and only 11 of 105 voice rows
+                    # on the board carried any text. Whisper was not failing;
+                    # it was almost never pointed anywhere useful.
+                    #
+                    # The sweep already visits every channel every lap and
+                    # already holds the audio, so this costs no radio time —
+                    # only CPU, which is the thing we have spare.
+                    if hits and whisper_ok() and VM_X is not None:
+                        try:
+                            pre = _fft_spectrum(iq)
+                            for h in hits:
+                                off_f = h["freq"] - center
+                                if abs(off_f) > RATE * 0.45:
+                                    continue
+                                yb = _chanl(iq, RATE, off_f, LISTEN_RATE,
+                                            pre=pre)
+                                if shape_is_voice(yb, LISTEN_RATE) is not True:
+                                    continue
+                                st = surface_stats(yb, LISTEN_RATE)
+                                if st and is_really_live(st[0], st[2]):
+                                    queue_listen(h["freq"], yb, LISTEN_RATE)
+                        except Exception:
+                            pass
                     for h in hits:
                         h["band"] = name
                         h.setdefault("kind", "narrow")
