@@ -1,5 +1,13 @@
 # Review findings
 
+> **Read `docs/shapes.md` first.** Every item below that touches voice-vs-data
+> is written in terms of single-capture features — rhythm, flatness, dynamics.
+> Measured 2026-08-01: those all plateau at 76-90% and one of them shipped and
+> had to be reverted the same night. The difference between a machine and a
+> person lives ACROSS laps, not inside one capture. Do not spend more time
+> tuning a single-capture number.
+
+
 **Where this stands — 11 done, 16 open.** Ranked by how much it affects what
 you actually see, against what it costs to fix. That is deliberately NOT the
 same axis the sections below use: those are grouped by KIND of wrongness, which
