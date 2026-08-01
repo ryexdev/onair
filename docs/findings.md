@@ -38,6 +38,19 @@ Nothing here is fixed yet.
   *Fix:* pick the channelizer rate from `m["width"]` (`max(48_000, 4*width)`).
   `classify`/`metrics`/`syllabic` are already rate-parameterised.
 
+- [ ] **V — continuous data reads `voice`.** The rhythm-only branch at
+  scan.py:1085 (`or syllabic(y,rate) > 6.0`) claims the word *voice* on
+  structure alone. Confirmed live on **507.3625**, an LA T-band trunked
+  **control channel**: 100% duty, never off, 14.6 kHz, pure data — labelled
+  `voice` at 26.9 dB. Same mechanism as 406.125. Neighbours 507.3134 / 507.4869
+  / 507.8374 run 91-99% duty and mislabel the same way.
+  *Fix:* that branch should yield a carrying-but-unnamed verdict and let
+  whisper supply the name. `syllabic > 6.0` is a clean **carrying** detector
+  (8/8 on `data`, 0/18 on `none`); the leap from rhythm to *voice* is what no
+  label in the set supports. One word changed, no threshold moved. Cost: real
+  voice reads unnamed until whisper confirms, staying visible throughout.
+  See also the 406.125 note under *Do not chase*.
+
 - [ ] **V — idle carriers read `digital`.** `clock()` prove.py:212-220 has no
   mains-hum notch, while `metrics()` notches 60 Hz harmonics 12 lines earlier
   (prove.py:140-143) for exactly this reason. 268.2 — the channel that motivated
