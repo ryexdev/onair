@@ -1730,7 +1730,10 @@ tr td .v-burst{color:#d09ae0}
    hover to see them. Structural voice verdicts have no mark. */
 .v.hrd{box-shadow:inset 0 0 0 1px #4ec27a}
 th.hd,td.hd{color:#8fbf9e;font-size:12px;padding-right:18px}
-th.bf,td.bf{text-align:center;padding-left:10px}
+/* Sits between freq and band, so it is padded on both sides now rather than
+   pushed off the right edge. width:1px + nowrap makes the table give it the
+   minimum a single glyph needs and hand the slack back to band/heard/notes. */
+th.bf,td.bf{text-align:center;padding:0 5px;width:1px;white-space:nowrap}
 .bfm{font-size:10px}
 .bfm.ok{color:#4ec27a}
 .bfm.dg{color:#c2a24e}
@@ -1998,13 +2001,14 @@ async function tick(){
     (d.lap_s!=null?d.lap_s.toFixed(1):'--')+'s per lap (avg of 3)'+
     (off.size?' · '+off.size+' band(s) skipped, not scanned':'');
   var h='<table><thead><tr>'+
-        '<th>freq MHz</th><th>band</th><th>signal</th><th>snr</th>'+
+        '<th>freq MHz</th>'+
+        '<th class=bf title="can your Baofeng receive this?">bf</th>'+
+        '<th>band</th><th>signal</th><th>snr</th>'+
         '<th class=fx data-c=carrying>carrying<span class=car>\u25be</span></th>'+
         '<th class=fx data-c=type>shape<span class=car>\u25be</span></th>'+
         '<th class="fx r nw" data-c=age>last seen<span class=car>\u25be</span></th>'+
         '<th class=hd>heard</th>'+
         '<th class=nt>notes</th>'+
-        '<th class=bf title="can your Baofeng receive this?">bf</th>'+
         '</tr></thead><tbody>';
   for(var i=0;i<rows.length;i++){var r=rows[i],c=age_col(r.age);
     var cls=(r.on?'on':'')+(r.fav?' fav':'');
@@ -2014,6 +2018,7 @@ async function tick(){
        '<span class="dot'+(r.on?' on':'')+'"></span>'+r.freq.toFixed(4)+
        (r.meas!=null&&Math.abs(r.meas-r.freq)>0.0004
           ?'<span class=meas>rx '+r.meas.toFixed(4)+'</span>':'')+'</td>'+
+       '<td class=bf>'+bfMark(r)+'</td>'+
        '<td class=b>'+(r.tag||'')+'</td>'+
        '<td><div class=bar>'+(r.snr==null?'':'<i style="width:'+snr_w(r.snr)+'%;background:'+c+'"></i>')+'</div></td>'+
        '<td class=n>'+(r.snr==null?'<span class=nh>\u2014</span>':r.snr.toFixed(1)+' dB')+'</td>'+
@@ -2026,8 +2031,7 @@ async function tick(){
        '<td class=nt>'+(r.fav
          ?'<input class=note data-f="'+r.freq.toFixed(4)+'" placeholder="add a note\u2026" value="'+
           (r.note||'').replace(/"/g,'&quot;')+'">'
-         :'')+'</td>'+
-       '<td class=bf>'+bfMark(r)+'</td></tr>';
+         :'')+'</td></tr>';
   }
   if(!rows.length)h+='<tr><td colspan=10 class=empty>'+
     (pre.length?'every row is filtered out \u2014 use a column menu to bring them back'
