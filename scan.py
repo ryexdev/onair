@@ -852,9 +852,22 @@ def harvest_clip(freq_hz, audio, rate, cls, by, note):
             ear = json.load(open(p))
         except Exception:
             ear = {}
+        # NEVER let a machine label overwrite a human one. This file is keyed
+        # by frequency, so an automatic harvest silently replaced the
+        # operator's own ear labels for 506.4125 and 152.2100 — which turned
+        # out to be the only real test any of this had — and they had to be
+        # recovered from a separate recording to run it.
+        prev = ear.get(f"{mhz:.4f}")
+        if prev and prev.get("by") == "ear":
+            return
         ear[f"{mhz:.4f}"] = {"class": cls, "by": by,
                              "heard": txt[:120], "clip": name}
-        json.dump(ear, open(p, "w"), indent=1)
+        # temp + rename: open(p,"w") truncates immediately, and two writers
+        # racing on it once cut this file from 119 entries to 13.
+        tmp = p + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(ear, fh, indent=1)
+        os.replace(tmp, p)
     except Exception:
         pass                      # ground truth is a bonus, never a blocker
 

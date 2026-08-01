@@ -264,3 +264,31 @@ the entire reason for this run.
        whisper for anything in 470-512, and see what survives.
 
   The one thing still standing after eight cycles remains `is_really_live()`.
+
+- **cycle 9 — dropping the suspect labels does NOT rescue the 93%.**
+
+  Removed all 41 whisper labels inside 470-512 (the T-band, where whisper is
+  demonstrably transcribing digital) and re-scored:
+
+        all labels                  450 clips   93%   floor 68%
+        whisper dropped in T-band   409 clips   94%   floor 75%
+
+  The score barely moves, but the FLOOR rises 68 -> 75, so the real edge shrank
+  from 25 points to 19. And the cycle-8 exam failure stands regardless: the
+  contamination is not confined to the band I could identify.
+
+  Fixed two data-integrity bugs in the harvester, both mine:
+
+    * human `by: ear` labels can no longer be overwritten by an automatic one
+    * the label file is now written temp-then-rename; two writers racing on
+      `open(p,"w")` had already cut it from 119 entries to 13 once
+
+  ## Standing back after nine cycles
+
+  Nothing here is safe to build on yet, and the reason is not the features —
+  it is the labels. Every accuracy number tonight was computed against a set
+  where an unknown fraction of "voice" is actually digital. The 93% may be
+  excellent or may be worthless and there is currently no way to tell.
+
+  The bottleneck is no longer measurement. It is ground truth. Twenty channels
+  labelled by ear would settle more than another thousand auto-labelled clips.
