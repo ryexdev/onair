@@ -321,7 +321,11 @@ def kind_of(y, rate=CHAN_RATE):
         c1, f1 = clock(act[:h])
         c2, f2 = clock(act[h:])
         if min(c1, c2) > 18.0 and abs(f1 - f2) < 150.0:
+            # Record HOW hard it fired, so callers can tell a marginal digital
+            # from a certain one. Only certainties belong in training data.
+            kind_of.last_clock = (float(min(c1, c2)), float((f1 + f2) / 2))
             return "digital"
+    kind_of.last_clock = None
 
     if syllabic(y, rate) > 6.0:
         return "voice"

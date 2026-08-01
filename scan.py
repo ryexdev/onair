@@ -714,13 +714,34 @@ def queue_listen(freq_hz, audio, rate):
         pass
 
 
+# Well above the 18 dB gate kind_of decides on. A verdict can be marginal;
+# training data must not be.
+CLOCK_SURE_DB = 24.0
 VOICE_HARVEST_MAX = 40        # per channel per run; ground truth, not a log
 
 _harvested = {}
 
 
-def harvest_voice(freq_hz, audio, rate, txt):
-    """Save whisper-confirmed voice as a labelled clip. Never raises."""
+def harvest_clip(freq_hz, audio, rate, cls, by, note):
+    """Save a self-labelled clip. Never raises.
+
+    Both classes can now label themselves, which is what makes a blind test
+    possible at all:
+
+      VOICE    whisper returned real words. A vocoder yields hash, so nothing
+               digital reaches that branch.
+      DIGITAL  the symbol-clock test fired HARD — both halves over
+               CLOCK_SURE_DB on the same frequency. 507.3125 identified itself
+               that way at 4804 Hz, and P25 is 4800 baud exactly. A margin
+               well above the 18 dB decision gate is used on purpose: this is
+               training data, so only certainties belong in it.
+
+    The gap this fills: clips/labels.json is keyed by frequency over a
+    data/none/unsure vocabulary, and tools/label.py offers ONE button reading
+    "voice / data" — the two classes that most need separating are merged in
+    the UI itself. Every attempt at the voice/digital confusion has been
+    guesswork for want of this.
+    """
     try:
         import wave
         mhz = round(freq_hz / 1e6, 4)
@@ -728,11 +749,13 @@ def harvest_voice(freq_hz, audio, rate, txt):
         if n >= VOICE_HARVEST_MAX:
             return
         _harvested[mhz] = n + 1
+        txt = note
         d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clips")
         os.makedirs(d, exist_ok=True)
         a = np.angle(audio[1:] * np.conj(audio[:-1])).astype(np.float32)
         a = a / (np.abs(a).max() + 1e-9) * 0.7
-        name = f"{mhz:.4f}".replace(".", "_") + f"_{int(time.time())}_v.wav"
+        name = (f"{mhz:.4f}".replace(".", "_")
+                + f"_{int(time.time())}_{cls[0]}.wav")
         with wave.open(os.path.join(d, name), "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(int(rate))
             w.writeframes((a * 32767).astype("<i2").tobytes())
@@ -741,7 +764,7 @@ def harvest_voice(freq_hz, audio, rate, txt):
             ear = json.load(open(p))
         except Exception:
             ear = {}
-        ear[f"{mhz:.4f}"] = {"class": "voice", "by": "whisper",
+        ear[f"{mhz:.4f}"] = {"class": cls, "by": by,
                              "heard": txt[:120], "clip": name}
         json.dump(ear, open(p, "w"), indent=1)
     except Exception:
@@ -782,7 +805,8 @@ def whisper_worker():
                 # Costs one wav write on an event that happens ~80 times an
                 # hour, and it needs nobody to sit and watch for a channel to
                 # get busy.
-                harvest_voice(freq_hz, audio, rate, txt)
+                harvest_clip(freq_hz, audio, rate,
+                             "voice", "whisper", txt)
             else:
                 # Listened and heard nothing. THAT is what retires a
                 # transcript — evidence, not the passage of time.
@@ -1093,7 +1117,8 @@ def verify_slice(r, center_hz, freqs, pool, also_listen=()):
     become the new bottleneck — hence the thread pool. numpy releases the GIL
     for FFTs, so this genuinely uses the cores.
     """
-    from prove import channelize, spectrum, metrics, safe_offset, CHAN_RATE
+    from prove import (channelize, spectrum, metrics, safe_offset, CHAN_RATE,
+                       kind_of as kind_of_ref)
     # Do not let the capture centre land on a local clock. Slice centres are a
     # multiple of the span, and for a channel at 28.7625 that multiple IS
     # 28.8 MHz — the dongle's reference, which measures 64 dB. The channel read
@@ -1166,6 +1191,13 @@ def verify_slice(r, center_hz, freqs, pool, also_listen=()):
             # from 4.7-11.1 dB, and every correct confirmation from 17-18 dB.
             # Word count cannot separate them — real transmissions are short
             # too — but level can. 448.0600 clears it at 30 dB.
+            # DIGITAL self-labels when its clock fires hard. Cheap: kind_of
+            # already ran inside classify(), this only reads what it recorded.
+            if v == "digital" and listening:
+                ck = getattr(kind_of_ref, "last_clock", None)
+                if ck and ck[0] >= CLOCK_SURE_DB:
+                    harvest_clip(f, y, CHAN_RATE, "digital", "clock",
+                                 f"symbol clock {ck[1]:.0f} Hz at {ck[0]:.1f} dB")
             if listening:
                 pres = metrics(y, CHAN_RATE)[4]
                 if not np.isnan(pres) and pres >= LISTEN_MIN_PRES:
