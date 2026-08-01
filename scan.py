@@ -714,6 +714,40 @@ def queue_listen(freq_hz, audio, rate):
         pass
 
 
+VOICE_HARVEST_MAX = 40        # per channel per run; ground truth, not a log
+
+_harvested = {}
+
+
+def harvest_voice(freq_hz, audio, rate, txt):
+    """Save whisper-confirmed voice as a labelled clip. Never raises."""
+    try:
+        import wave
+        mhz = round(freq_hz / 1e6, 4)
+        n = _harvested.get(mhz, 0)
+        if n >= VOICE_HARVEST_MAX:
+            return
+        _harvested[mhz] = n + 1
+        d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clips")
+        os.makedirs(d, exist_ok=True)
+        a = np.angle(audio[1:] * np.conj(audio[:-1])).astype(np.float32)
+        a = a / (np.abs(a).max() + 1e-9) * 0.7
+        name = f"{mhz:.4f}".replace(".", "_") + f"_{int(time.time())}_v.wav"
+        with wave.open(os.path.join(d, name), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(int(rate))
+            w.writeframes((a * 32767).astype("<i2").tobytes())
+        p = os.path.join(d, "ear.json")
+        try:
+            ear = json.load(open(p))
+        except Exception:
+            ear = {}
+        ear[f"{mhz:.4f}"] = {"class": "voice", "by": "whisper",
+                             "heard": txt[:120], "clip": name}
+        json.dump(ear, open(p, "w"), indent=1)
+    except Exception:
+        pass                      # ground truth is a bonus, never a blocker
+
+
 def whisper_worker():
     import os, subprocess, tempfile
     from prove import wav
@@ -738,6 +772,17 @@ def whisper_worker():
                 with heard_lock:
                     heard[round(freq_hz)] = (time.time(), txt[:120])
                 print(f"  [heard] {freq_hz/1e6:10.4f}  {txt[:60]}", flush=True)
+                # SELF-LABELLING GROUND TRUTH. Whisper returning real words is
+                # proof this channel is analog voice — a vocoder gives hash, so
+                # nothing digital gets here — and we are already holding the
+                # audio it proved it on. That combination is exactly the
+                # labelled data this project has never had: clips/labels.json
+                # offers a single merged "voice / data" button, so the one
+                # distinction that matters most cannot be recorded in it.
+                # Costs one wav write on an event that happens ~80 times an
+                # hour, and it needs nobody to sit and watch for a channel to
+                # get busy.
+                harvest_voice(freq_hz, audio, rate, txt)
             else:
                 # Listened and heard nothing. THAT is what retires a
                 # transcript — evidence, not the passage of time.
