@@ -221,3 +221,46 @@ the entire reason for this run.
        third class this two-way test never sees.
     4. Test it against the operator's ear on 506.4125 and 152.2100 — the two
        channels every previous attempt got wrong. That is the real exam.
+
+- **cycle 8 — the 93% FAILS the only test with human ground truth.**
+
+  Held out the whole channel and asked the cycle-7 method about the two
+  channels the operator identified by ear as a data stream ("an idling diesel,
+  electronic, fast"):
+
+        506.4125   ->  VOICE     all 5 nearest neighbours voice, sim 0.965
+        506.9875   ->  DIGITAL   sim 0.175, i.e. no real match at all
+
+  506.4125 is wrong, unanimously and with high confidence. Its nearest match at
+  0.965 is 470.7 MHz — another T-band channel carrying a `voice` label from
+  whisper.
+
+  ## What this means
+
+  The library is contaminated. Whisper sometimes returns words on T-band
+  digital — a brief analog moment on a mixed system, or an outright
+  hallucination — so digital channels sit in the library labelled voice.
+  506.4125 then matches them *correctly*. The method is doing its job; the
+  labels are wrong.
+
+  **So the 93% is agreement with a contaminated label set, not accuracy.** It
+  cannot be trusted, and neither can any number computed from `ear.json` as it
+  stands. That includes several earlier cycles.
+
+  Note also that `ear.json` is keyed by frequency, so a later harvest silently
+  OVERWRITES an earlier label for the same channel. The operator's own ear
+  labels for 506.4125 and 152.2100 were lost that way — they had to be
+  recovered from a separate recording to run this test at all. Human labels
+  must never be overwritable by automatic ones.
+
+  ## What the next session should do first
+
+    1. Make `by: ear` labels immutable — automatic harvests must not overwrite
+       them, and ideally each capture gets its own row rather than one row per
+       frequency.
+    2. Audit the whisper-labelled T-band rows specifically. If whisper is
+       transcribing P25, every whisper label on a trunked band is suspect.
+    3. Re-score cycle 7 only against ear labels and clock labels, dropping
+       whisper for anything in 470-512, and see what survives.
+
+  The one thing still standing after eight cycles remains `is_really_live()`.
