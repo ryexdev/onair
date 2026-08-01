@@ -72,6 +72,7 @@ import os
 import socket
 import struct
 import subprocess
+import threading
 import time
 
 import numpy as np
@@ -83,6 +84,50 @@ RATE = 6_000_000            # 14-bit native ceiling; see module docstring
 USABLE = 0.85               # 5.1 MHz, measured -1.25 dB at the edge
 F_MIN, F_MAX = 1_000, 2_000_000_000
 LNA_MIN, LNA_MAX = 0, 8     # reported by the device
+# Must comfortably exceed the LARGEST single read anyone asks for, or that
+# read can never be satisfied and simply hangs. The verify path wants
+# VERIFY_SECS (1.2 s) in one go, which at 6 Msps is 28.8 MB — a 16 MB ring
+# stalled the scanner at lap 4 with no error at all.
+_RING_BYTES = 96 << 20        # ~4 s at 6 Msps
+
+# SDRconnect's pipeline holds samples between the tuner and the socket, so a
+# frequency change does not appear at our end for a while. Clearing the ring is
+# NOT enough: the very next bytes to arrive are still the OLD frequency.
+# Measured by alternating a loud FM centre against a dead one and asking how
+# often a sweep-sized read (98,304 samples) came back from the wrong place:
+#
+#     settle   0 ms  ->  8 of 12 reads were the previous frequency
+#             20 ms  ->  9 of 12          (still lagging by a whole step)
+#             40 ms  ->  9 of 12
+#             60 ms  ->  0 of 12          <- locks here
+#             80 ms  ->  0 of 12
+#            120 ms  ->  0 of 12
+#
+# 80 ms for margin. This was THE detection bug on this hardware: every sweep
+# step was analysing the spectrum of the step before it, so nothing landed on
+# the frequency it was attributed to and strong narrow signals — NOAA on
+# 162.5500 at 43 dB — were simply never seen.
+SETTLE_S = 0.08
+
+
+def _frame_len(buf):
+    """Total byte length of the websocket frame at the head of buf, or None if
+    the header itself is not fully present yet."""
+    if len(buf) < 2:
+        return None
+    ln = buf[1] & 0x7F
+    off = 2
+    if ln == 126:
+        if len(buf) < 4:
+            return None
+        ln = struct.unpack(">H", bytes(buf[2:4]))[0]; off = 4
+    elif ln == 127:
+        if len(buf) < 10:
+            return None
+        ln = struct.unpack(">Q", bytes(buf[2:10]))[0]; off = 10
+    if buf[1] & 0x80:                      # masked (servers do not mask)
+        off += 4
+    return off + ln
 
 
 class Rsp:
@@ -109,7 +154,36 @@ class Rsp:
             self.set_gain(gain_db)
         self._send("device_stream_enable", "", "true")
         self._send("iq_stream_enable", "", "true")
-        self._settle()
+        # A DEDICATED READER. The stream is free-running at ~24 MB/s, so every
+        # millisecond the caller spends in analyse() is a millisecond nobody is
+        # draining the socket. Left to itself the window fills, the server
+        # stalls, and read() eventually times out — which is exactly how this
+        # failed: a bare tune/flush/read loop ran all 392 steps happily, and
+        # the identical loop with FFTs in between died within a lap.
+        # Blocking, no timeout. The 10 s timeout create_connection() left on
+        # the socket applies to the reader too, and the gap between enabling
+        # the stream and the first frame can exceed it — which killed the
+        # reader on startup and forced a needless reopen on every launch.
+        self.s.settimeout(None)
+        self._lock = threading.Lock()
+        self._stop = False
+        self._err = None
+        self._rx = threading.Thread(target=self._reader, daemon=True)
+        self._rx.start()
+        # Wait for the stream to actually start rather than assuming a fixed
+        # delay is enough. SDRconnect can take several seconds to go from
+        # "stream enabled" to the first frame, and a fixed 0.6 s sleep meant
+        # the caller's first read() timed out and triggered a pointless
+        # reopen on every single launch.
+        end = time.time() + 15.0
+        while time.time() < end:
+            with self._lock:
+                if self._iq:
+                    break
+            if self._err is not None:
+                raise RuntimeError(f"stream never started: {self._err!r}")
+            time.sleep(0.05)
+        self.flush()
 
     # ---- websocket plumbing ------------------------------------------------
 
@@ -176,6 +250,23 @@ class Rsp:
         self._send("set_property", prop, value)
 
     def get(self, prop, timeout=2.0):
+        if getattr(self, "_rx", None) is not None:
+            return self._get_threaded(prop, timeout)
+        return self._get_direct(prop, timeout)
+
+    def _get_threaded(self, prop, timeout):
+        """Once the reader thread owns the socket, control replies come back
+        through it rather than being read here."""
+        self._want = (prop, None)
+        self._send("get_property", prop, "")
+        end = time.time() + timeout
+        while time.time() < end:
+            if self._want[1] is not None:
+                return self._want[1]
+            time.sleep(0.005)
+        return None
+
+    def _get_direct(self, prop, timeout=2.0):
         """Read a property. Ignores property_changed pushes, which carry the
         same property name and would otherwise return a stale queued value."""
         self._send("get_property", prop, "")
@@ -217,10 +308,14 @@ class Rsp:
         self._set("lna_state", str(st))
 
     def tune(self, hz):
-        hz = int(hz)
-        if not (F_MIN <= hz <= F_MAX):
-            raise ValueError(f"{hz/1e6:.3f} MHz outside 0.001-2000 MHz")
+        # Clamp rather than raise. A sweep step is CENTRED on its slice, so the
+        # last step of a band legitimately asks for a centre up to half a span
+        # past the band edge — 2002 MHz when sweeping to 2000. Refusing that
+        # killed the sweep on its first lap; clamping just means the top half
+        # slice is slightly narrower, which is what you want.
+        hz = int(min(max(int(hz), F_MIN), F_MAX))
         self._set("device_center_frequency", str(hz))
+        self._settled_at = time.time() + SETTLE_S
 
     def overloaded(self):
         return (self.get("overload") or "false") == "true"
@@ -236,62 +331,76 @@ class Rsp:
         if len(pay) >= 2 and struct.unpack("<H", pay[:2])[0] == 2:
             self._iq.extend(pay[2:])          # int16 interleaved, primary
 
-    def _settle(self, secs=1.0):
-        end = time.time() + secs
-        while time.time() < end:
-            self.s.settimeout(max(0.05, end - time.time()))
-            try:
+    def _reader(self):
+        """Drain the socket forever, into a bounded ring of recent IQ.
+
+        Bounded on purpose: if the consumer is slow we want to throw away OLD
+        samples and keep current ones, not grow without limit. A sweep only
+        ever wants the most recent slice anyway.
+        """
+        try:
+            while not self._stop:
                 op, pay = self._frame()
-            except Exception:
-                break
-            if op == 0x2:
-                self._stash(pay)
-        self._iq.clear()
+                if op == 0x8:
+                    raise RuntimeError("SDRconnect closed the stream")
+                if op == 0x1:
+                    want = getattr(self, "_want", None)
+                    if want and want[1] is None:
+                        try:
+                            m = json.loads(pay)
+                        except Exception:
+                            m = {}
+                        if (m.get("event_type") == "get_property_response"
+                                and m.get("property") == want[0]):
+                            self._want = (want[0], m.get("value"))
+                    continue
+                if op == 0x2 and len(pay) >= 2 and \
+                        struct.unpack("<H", pay[:2])[0] == 2:
+                    with self._lock:
+                        self._iq.extend(pay[2:])
+                        if len(self._iq) > _RING_BYTES:
+                            del self._iq[:len(self._iq) - _RING_BYTES]
+        except Exception as e:
+            self._err = e
 
     def flush(self):
         """Drop everything captured before now.
 
         The RTL-SDR version discards a queued USB buffer. Here the stream is
-        free-running, so after a tune the pipe still holds samples from the
-        OLD frequency — dropping them is what makes tune() mean anything.
+        free-running, so after a tune the pipe still holds samples from the OLD
+        frequency, and dropping them is what makes tune() mean anything.
+
+        Waits out SETTLE_S first. Callers already do tune/flush/read, so
+        putting the wait here means every one of them gets it for free and none
+        of them has to know the hardware needs it. Time spent waiting is not
+        wasted anyway — the reader thread is filling the ring while we sit.
         """
-        self._iq.clear()
-        self.s.settimeout(0.0)
-        try:
-            while True:
-                d = self.s.recv(1 << 18)
-                if not d:
-                    break
-                self._buf.extend(d)
-        except (BlockingIOError, socket.error):
-            pass
-        # keep frame alignment: decode what arrived, then throw it away
-        self.s.settimeout(0.2)
-        try:
-            while len(self._buf) >= 2:
-                op, pay = self._frame()
-                if op == 0x2:
-                    self._stash(pay)
-        except Exception:
-            pass
-        self._iq.clear()
+        left = getattr(self, "_settled_at", 0) - time.time()
+        if left > 0:
+            time.sleep(left)
+        with self._lock:
+            self._iq.clear()
 
     def read(self, n_samples):
         """n complex64 samples, scaled to roughly +/-1 like rtl.py's read()."""
         need = int(n_samples) * 4                 # 2 ch x int16
-        self.s.settimeout(5.0)
-        while len(self._iq) < need:
-            op, pay = self._frame()
-            if op == 0x8:
-                raise RuntimeError("SDRconnect closed the stream")
-            if op == 0x2:
-                self._stash(pay)
-        raw = np.frombuffer(bytes(self._iq[:need]), dtype="<i2")
-        del self._iq[:need]
+        end = time.time() + 5.0
+        while True:
+            if self._err is not None:
+                raise RuntimeError(f"stream reader died: {self._err!r}")
+            with self._lock:
+                if len(self._iq) >= need:
+                    raw = np.frombuffer(bytes(self._iq[:need]), dtype="<i2")
+                    del self._iq[:need]
+                    break
+            if time.time() > end:
+                raise RuntimeError("no IQ from SDRconnect for 5 s")
+            time.sleep(0.001)
         v = raw.astype(np.float32) / 32768.0
         return (v[0::2] + 1j * v[1::2]).astype(np.complex64)
 
     def close(self):
+        self._stop = True
         try:
             self._send("iq_stream_enable", "", "false")
             self._send("device_stream_enable", "", "false")
