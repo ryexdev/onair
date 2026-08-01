@@ -242,7 +242,26 @@ def kind_of(y, rate=CHAN_RATE):
         t = t - t.mean()
         T = np.abs(np.fft.rfft(t * np.hanning(len(t)))) ** 2
         fr = np.fft.rfftfreq(len(t), 1 / rate)
+        # Notch mains hum, the same way metrics() already does. Without it an
+        # idle carrier reads DIGITAL: 268.2 — the channel this whole carrying
+        # test was built around — measured c1 23.3 / c2 22.0 dB, both at
+        # 359.9 Hz, which is 6 x 60. The two-halves rule is no defence here.
+        # Its stated purpose is that "a single strong peak can be a tone, so it
+        # only counts if the two halves agree" — but a hum tone is PRECISELY
+        # what agrees across halves, so the test that was meant to reject it
+        # confirms it instead.
+        #
+        # ONLY the low harmonics. metrics() notches all of them, but it is
+        # measuring flatness across a whole band and can afford to lose bins.
+        # This function is hunting a single peak, and real symbol clocks land
+        # on 60 Hz multiples: P25 sits at exactly 4800 Hz, which is 80 x 60.
+        # Notching to 15 kHz would delete the very thing the test exists to
+        # find. Mains hum is a low-frequency artefact — the observed case was
+        # the 6th harmonic — so stop at 1200 Hz, comfortably above any real
+        # hum and comfortably below P25's 4800 and FLEX's 3200.
         m = (fr > 200) & (fr < 15000)
+        for k in range(1, int(1200 / 60) + 1):
+            m &= np.abs(fr - 60.0 * k) >= 15.0
         T, fr = T[m], fr[m]
         i = int(np.argmax(T))
         return float(10 * np.log10(T[i] / (np.median(T) + 1e-30))), float(fr[i])
