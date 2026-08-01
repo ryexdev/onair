@@ -172,3 +172,52 @@ the entire reason for this run.
 
   Next attempt should compare whole surfaces to each other rather than
   summarise them, or stop measuring and go back to looking.
+
+- **cycle 7 — THE ANSWER. Compare whole spectra, do not summarise them: 93%.**
+
+  Cycle 6 concluded the difference is not a scalar and the next attempt should
+  compare whole surfaces. Doing exactly that:
+
+        method: nearest NEIGHBOUR over the full-resolution demodulated
+                spectrum, 228 bins, 200 Hz to rate*0.45, DC excluded,
+                mean-removed and unit-normalised. No binning, no averaging
+                into templates, no thresholds.
+
+        426 clips over 132 distinct channels (121 voice, 304 digital)
+
+        leave-one-CHANNEL-out   93%     <- never compared to its own channel
+        leave-one-out (leaky)   94%
+        floor                   71%
+        rhythm test in the code 76%
+
+  The channel-held-out number is the one that matters: 93% against 71%, and it
+  is only 1 point below the leaky version, so it is NOT recognising individual
+  channels. It generalises to channels it has never seen.
+
+  ## Why this works where five scalars failed
+
+  Every previous attempt collapsed the spectrum to one number, which throws
+  away the shape. The 24-band centroid fingerprint scored 76% for two reasons,
+  both fixed here:
+
+    * binning into 24 wide bands smoothed away the fine structure
+    * a centroid averages ALL digital types into one blob, but P25, FLEX and a
+      stuck carrier have genuinely different shapes. Nearest NEIGHBOUR lets
+      each keep its own, which is the "more than 3 buckets" point made
+      repeatedly by the operator and confirmed by clustering at cycle 0.
+
+  ## Before anyone ships this
+
+  Not implemented — this run is data collection only, and the flatness change
+  that was shipped and reverted the same night is the reason for that rule.
+
+  Open questions for the next session:
+
+    1. Cost. 426 stored spectra x 228 bins is one matrix multiply per channel;
+       needs timing against the sweep budget, though it should be trivial.
+    2. The labels are still whisper-for-voice and clock-for-digital, both
+       biased toward clear-cut cases. 93% on easy cases may be less in the wild.
+    3. It needs the live gate in front of it. Untested on noise, which is a
+       third class this two-way test never sees.
+    4. Test it against the operator's ear on 506.4125 and 152.2100 — the two
+       channels every previous attempt got wrong. That is the real exam.
