@@ -722,6 +722,86 @@ VOICE_HARVEST_MAX = 40        # per channel per run; ground truth, not a log
 _harvested = {}
 
 
+# --- surface measurements ----------------------------------------------------
+# Three numbers taken off the frequency x time x power surface, in the surface's
+# own terms rather than as yet another statistic over a flattened spectrum.
+# Every single-capture feature tried so far plateaus at 76-90% and one had to be
+# reverted the same night; see docs/shapes.md.
+#
+# The eye separates these instantly on a 3D plot, and what it is reading is:
+# is there a peak, how NARROW is it, and does it hold still. A machine puts its
+# energy on one symbol rate or one tone and draws a thin ridge; a voice spreads
+# across a formant region and draws a broad hill; noise draws neither.
+#
+# First measurement, verified-live channels only:
+#
+#     NOAA voice     above 21.5 dB   width 562 Hz   moves 9922 Hz
+#     diesel         above 37.5      width 188      moves  476
+#     P25            above 11.8      width 188      moves 7795
+#     T 482.9000     above 47.5      width  94      moves 2531
+#     carrier        above 20.5      width  94      moves    0
+#
+# Voice is 3-6x WIDER than every machine with no overlap. One voice sample, so
+# this records rather than decides.
+SURF_NFFT = 512
+
+
+def surface_stats(y, rate):
+    """-> (above_floor_dB, peak_width_Hz, peak_Hz) or None."""
+    d = np.angle(y[1:] * np.conj(y[:-1]))
+    n = (len(d) // SURF_NFFT) * SURF_NFFT
+    if n < SURF_NFFT:
+        return None
+    P = np.abs(np.fft.rfft(d[:n].reshape(-1, SURF_NFFT) * np.hanning(SURF_NFFT),
+                           axis=1)) ** 2
+    M = 10 * np.log10(P.mean(axis=0) + 1e-20)
+    fr = np.fft.rfftfreq(SURF_NFFT, 1 / rate)
+    pk = int(np.argmax(M))
+    above = float(M[pk] - np.median(M))
+    half = M[pk] - 3.0
+    lo = pk
+    while lo > 0 and M[lo] > half:
+        lo -= 1
+    hi = pk
+    while hi < len(M) - 1 and M[hi] > half:
+        hi += 1
+    return above, float(fr[hi] - fr[lo]), float(fr[pk])
+
+
+def is_really_live(above, peak_hz):
+    """Reject hiss wearing a label.
+
+    Four of five NOAA channels sampled one night measured 4.5-9.3 dB above the
+    floor with their peak at 22-24 kHz — the top of the band, i.e. hiss — and
+    went into a dataset as "voice". That contamination is the likeliest reason
+    several promising features died on contact with it.
+    """
+    return above >= 8.0 and peak_hz < 8000.0
+
+
+_surf_lock = threading.Lock()
+SURF_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "clips", "surface.jsonl")
+
+
+def record_surface(freq_hz, y, rate, cls, by):
+    """Append one measurement. Records only; changes no verdict."""
+    try:
+        st = surface_stats(y, rate)
+        if st is None:
+            return
+        above, width, peak = st
+        row = {"t": int(time.time()), "mhz": round(freq_hz / 1e6, 4),
+               "class": cls, "by": by, "above": round(above, 1),
+               "width": round(width), "peak": round(peak),
+               "live": bool(is_really_live(above, peak))}
+        with _surf_lock:
+            with open(SURF_FILE, "a") as fh:
+                fh.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
+
+
 def harvest_clip(freq_hz, audio, rate, cls, by, note):
     """Save a self-labelled clip. Never raises.
 
@@ -807,6 +887,7 @@ def whisper_worker():
                 # get busy.
                 harvest_clip(freq_hz, audio, rate,
                              "voice", "whisper", txt)
+                record_surface(freq_hz, audio, rate, "voice", "whisper")
             else:
                 # Listened and heard nothing. THAT is what retires a
                 # transcript — evidence, not the passage of time.
@@ -1198,6 +1279,7 @@ def verify_slice(r, center_hz, freqs, pool, also_listen=()):
                 if ck and ck[0] >= CLOCK_SURE_DB:
                     harvest_clip(f, y, CHAN_RATE, "digital", "clock",
                                  f"symbol clock {ck[1]:.0f} Hz at {ck[0]:.1f} dB")
+                    record_surface(f, y, CHAN_RATE, "digital", "clock")
             if listening:
                 pres = metrics(y, CHAN_RATE)[4]
                 if not np.isnan(pres) and pres >= LISTEN_MIN_PRES:
