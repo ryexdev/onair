@@ -103,10 +103,29 @@ _RING_BYTES = 96 << 20        # ~4 s at 6 Msps
 #             80 ms  ->  0 of 12
 #            120 ms  ->  0 of 12
 #
-# 80 ms for margin. This was THE detection bug on this hardware: every sweep
-# step was analysing the spectrum of the step before it, so nothing landed on
-# the frequency it was attributed to and strong narrow signals — NOAA on
-# 162.5500 at 43 dB — were simply never seen.
+# This was THE detection bug on this hardware: every sweep step was analysing
+# the spectrum of the step before it, so nothing landed on the frequency it was
+# attributed to and strong narrow signals — NOAA on 162.5500 at 43 dB — were
+# simply never seen.
+#
+# DO NOT tune this down by measuring block POWER. That was tried, and a
+# power test says 0 ms is fine — 0 of 40 blocks came back from the wrong
+# frequency. It is the wrong question. A block can carry the right frequency's
+# power and still have its SPECTRUM smeared by the tail of the retune, and
+# smeared is exactly as undetectable as absent.
+#
+# Ask what the sweep actually asks: does analyse() find a known channel?
+# 12 attempts each on NOAA 162.5500 and 161.6850, real sweep centres:
+#
+#     settle    NOAA found   median SNR
+#        0 ms      3 / 12        36.9
+#       25 ms      3 / 12        32.9
+#       50 ms     12 / 12        47.4
+#       80 ms     12 / 12        49.6
+#
+# 25 ms was shipped briefly on the strength of the power test and put the
+# board back to almost nothing carrying. 80 ms costs ~31 s of a lap and is
+# worth every millisecond.
 SETTLE_S = 0.08
 
 
@@ -318,10 +337,36 @@ class Rsp:
         self._settled_at = time.time() + SETTLE_S
 
     def overloaded(self):
+        """Hardware front-end overload. Sees what the samples cannot.
+
+        Worth having because it fires BEFORE anything clips. Swept 98.1 MHz
+        down the whole LNA ladder:
+
+            lna_state 2   peak 0.415   clipped 0.00%   overload False
+            lna_state 1   peak 0.430   clipped 0.00%   overload False
+            lna_state 0   peak 0.523   clipped 0.00%   overload True
+
+        Nothing in those samples says "overloading" — 0.00% clipped and a peak
+        barely past half scale. The gain loop's peak > 0.85 test would never
+        have fired. Costs a 6.3 ms round trip, so ask only when the samples are
+        hot enough for the answer to plausibly be yes.
+        """
         return (self.get("overload") or "false") == "true"
 
     def power_dbm(self):
-        """Calibrated absolute power. The RTL-SDR path has no equivalent."""
+        """DO NOT USE FOR DETECTION. `signal_power` does not follow our tuner.
+
+        It looked like the headline win here — a calibrated absolute dBm the
+        RTL-SDR could never give. It is not. Tuned to three centres whose real
+        levels span 52 dB it returned the same number every time:
+
+            98.10 MHz   -9.7 dBFS   signal_power -73.57
+           250.00 MHz  -62.2 dBFS   signal_power -73.57
+           162.55 MHz  -47.1 dBFS   signal_power -73.57
+
+        It is measuring SDRconnect's own demodulator channel, which we never
+        steer. Left here only so nobody rediscovers it and wires it in.
+        """
         v = self.get("signal_power")
         return float(v) if v is not None else float("nan")
 

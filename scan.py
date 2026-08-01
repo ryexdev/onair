@@ -153,7 +153,15 @@ CFAR_GUARD_HZ = 169_000   # 72 bins on the RTL-SDR, the value validated there
 SPUR_TOL_HZ = 20_000
 
 
-def load_spurs(path="spurs.json"):
+# Spur lists are PER RADIO. The 30 measured spurs in spurs.json and the clock
+# combs below were measured on one specific RTL-SDR dongle; applying them to
+# the RSP1B would blind us at 144.000, 432.000, 120.000, 132.000 and
+# 456/459/468 for no reason at all, since that hardware has different clocks.
+SPURS_FILE = "spurs.json" if BACKEND != "rsp" else "spurs_rsp.json"
+
+
+def load_spurs(path=None):
+    path = path or SPURS_FILE
     try:
         with open(path) as f:
             return [v * 1e6 for v in json.load(f)["freqs_mhz"]]
@@ -174,7 +182,15 @@ def load_spurs(path="spurs.json"):
 #             It had put 405.0 (as "wx balloon"), 459.0 ("business"), 297.0 and
 #             162.0 on the board as CARRYING DATA. Also radiated — invisible
 #             with the antenna off.
-CLOCKS_HZ = (28_800_000.0, 12_000_000.0, 27_000_000.0)
+# 28.8 MHz is the RTL-SDR's own reference; 12 and 27 MHz are the computer's,
+# radiated and picked up by the antenna. The RSP1B has a different reference,
+# so its comb list starts EMPTY and is filled by an antenna-off calibration
+# run rather than inherited. An inherited list is worse than no list: it
+# silently deletes real channels.
+if BACKEND == "rsp":
+    CLOCKS_HZ = ()
+else:
+    CLOCKS_HZ = (28_800_000.0, 12_000_000.0, 27_000_000.0)
 
 
 BOOKMARKS = "bookmarks.json"
@@ -859,6 +875,13 @@ else:
     GAIN_LADDER = [16.6, 25.4, 32.8, 37.2, 40.2, 44.5, 49.6]
     GAIN_START  = 4
 
+# Peak above which it is worth spending a round trip asking the hardware
+# whether it is overloading. Set below the 0.415 measured at the last CLEAN
+# state and well below the 0.523 measured while overloading, so the question
+# gets asked in the gap between "obviously fine" and "the samples finally
+# admit it" — which is the whole range the peak test was blind to.
+OVERLOAD_PEEK = 0.35
+
 
 class Gains:
     """One gain for the whole spectrum cannot work. Measured on this hardware:
@@ -874,11 +897,26 @@ class Gains:
     def for_step(self, key):
         return GAIN_LADDER[self.i.setdefault(key, self.start)]
 
-    def adapt(self, key, iq):
-        """Aim for a healthy peak without clipping. Returns True if changed."""
+    def adapt(self, key, iq, ask_overload=None):
+        """Aim for a healthy peak without clipping. Returns True if changed.
+
+        ask_overload, where the radio offers one, is the hardware's own
+        front-end overload flag. The RSP1B overloads well before its samples
+        show it — measured 0.00% clipped at a peak of 0.52 while the flag read
+        True — so the peak test alone runs the front end into compression and
+        never notices. Asking costs a 6.3 ms round trip, so it is only asked
+        when the peak is high enough that the answer could plausibly be yes.
+        rtl.Rtl has no such flag, passes None, and keeps its old behaviour.
+        """
         peak = float(np.percentile(np.abs(iq.real), 99.9))
         i = self.i[key]
-        if peak > 0.85 and i > 0:                       # overloading
+        hot = peak > 0.85
+        if not hot and peak > OVERLOAD_PEEK and ask_overload is not None:
+            try:
+                hot = ask_overload()
+            except Exception:
+                hot = False
+        if hot and i > 0:                               # overloading
             self.i[key] = i - 1
         elif peak < 0.25 and i < len(GAIN_LADDER) - 1:  # starved
             self.i[key] = i + 1
@@ -2178,7 +2216,9 @@ def main(argv):
     print(f"scan  {mhz:.0f} MHz over {len(plan)} band(s):")
     for n, lo, hi, st in plan:
         print(f"      {n:8} {lo:7.1f}-{hi:<7.1f} {st:3d} steps")
-    print(f"      V4 #{idx} [{r.tuner}]  {steps} steps/lap  "
+    who = (getattr(r, "name", None) or f"RTL #{getattr(r, 'index', 0)} "
+           f"[{getattr(r, 'tuner', '?')}]")
+    print(f"      {who}  {steps} steps/lap  "
           f"{BIN_HZ:.0f} Hz bins  {FRAMES*NFFT/RATE*1000:.0f} ms dwell")
     print(f"      confirm after {CONFIRM_LAPS} laps, score >= {SCORE_MIN}")
 
@@ -2268,7 +2308,7 @@ def main(argv):
                             print("  [radio] back", flush=True)
                         continue
                     usb_fail = 0
-                    gains.adapt(key, iq)
+                    gains.adapt(key, iq, getattr(r, "overloaded", None))
 
                     hits = analyse(iq, center)
 
