@@ -238,3 +238,74 @@ API daemon is the broken piece (report to SDRplay, and try letting SDRconnect
 load the firmware then probing the API against the already-programmed
 device). If SDRconnect also fails, the RSP1B/Tahoe combination is broken
 below anything user-side software can fix.
+
+## Final diagnosis (2026-07-31): the API daemon's init code, not the Mac
+
+With every variable isolated — fresh daemon, verified cable, no competing
+process — the daemon fails identically on first contact:
+
+    IOUSBHostDevice::setConfigurationGated: pid 2629, sdrplay_apiService
+        selected configuration 1
+    endpoint 0x00: status 0xe00002d6 (timeout): 128 bytes transferred
+
+Meanwhile SDRplay's own SDRconnect app, which ships its OWN device code and
+does not use the API daemon, drives the same device on the same cable
+successfully: firmware loads, the device re-enumerates, and it streams with
+zero USB errors. Three-way isolation:
+
+    device  WORKS   (SDRconnect loaded firmware and streamed)
+    cable   WORKS   (2000/2000 clean EP0 transfers; SDRconnect session clean)
+    daemon  FAILS   (identical EP0 timeout, every attempt, both cables)
+
+The first bad cable muddied everything early on: it produced real transaction
+errors (endpoint 0x81, 0xe00002ed) that mimicked and compounded the daemon
+bug. Both were true at once — a bad cable AND a broken daemon. Cables were
+proven with an EP0 stress tool (1000x full-size GET_DESCRIPTOR reads) armed
+behind a hotplug watcher, so each candidate cable got a PASS/FAIL within
+seconds of being plugged in.
+
+Secondary trap: every failed daemon attempt LEAKS an exclusive device claim
+("libusb_exit: application left some devices open"), which then blocks
+SDRconnect too — kernel names the daemon pid as the holder. So a freshly
+restarted daemon makes SDRconnect STOP working, and a wedged-idle daemon lets
+it work. If SDRconnect mysteriously cannot see the device, the daemon
+probably failed first and is squatting on it.
+
+### Working configuration today
+
+Remove the daemon (verify it actually died — one bootout silently failed):
+
+    sudo launchctl bootout system/com.sdrplay.service
+    pgrep -fl sdrplay_apiService   # must print nothing
+
+Then SDRconnect owns the device and works. The scanner cannot use the RSP1B
+until SDRplay fixes the API; there is no user-side workaround, since the API
+is closed-source and SDRconnect bundles no substitute.
+
+### Bug report for SDRplay (paste-ready)
+
+    Hardware: RSP1B, USB descriptor 0x1DF7:0x3050, bcdDevice 0x0200
+    Host: MacBook Pro M2 Max, macOS 26.3.1 (Tahoe)
+    API: 3.15.1 (sdrplay_apiService via LaunchDaemon)
+
+    sdrplay_api_Open() and ApiVersion() succeed; sdrplay_api_GetDevices()
+    returns sdrplay_api_Fail with count 0 on every attempt.
+
+    Kernel trace of each attempt: the service opens the device, selects
+    configuration 1, then a control transfer on endpoint 0 times out
+    (IOKit status 0xe00002d6) after 128-1920 bytes. The service then exits
+    libusb without releasing the device ("application left some devices
+    open"), so the process retains an exclusive kernel claim that blocks
+    all later attempts, including its own — the kernel reports "provider is
+    already opened for exclusive access by pid <service pid>".
+
+    The same device on the same cable works fully under SDRconnect on the
+    same machine (firmware upload, re-enumeration, sustained streaming, no
+    USB errors), which isolates the failure to the API service's device
+    initialization. Also reproduced with the service's bundled libusb
+    replaced by 1.0.30 — identical EP0 timeout, minus the self-deadlock.
+
+    Two requests: fix the init exchange for this hardware revision on
+    macOS 26, and release the device handle on the failure path so a failed
+    init does not brick the device for every other client until the
+    process dies.
