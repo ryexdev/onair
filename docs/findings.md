@@ -44,18 +44,28 @@ recover.
   *Fix:* pick the channelizer rate from `m["width"]` (`max(48_000, 4*width)`).
   `classify`/`metrics`/`syllabic` are already rate-parameterised.
 
-- [ ] **V — continuous data reads `voice`.** The rhythm-only branch at
-  scan.py:1085 (`or syllabic(y,rate) > 6.0`) claims the word *voice* on
-  structure alone. Confirmed live on **507.3625**, an LA T-band trunked
-  **control channel**: 100% duty, never off, 14.6 kHz, pure data — labelled
-  `voice` at 26.9 dB. Same mechanism as 406.125. Neighbours 507.3134 / 507.4869
-  / 507.8374 run 91-99% duty and mislabel the same way.
-  *Fix:* that branch should yield a carrying-but-unnamed verdict and let
-  whisper supply the name. `syllabic > 6.0` is a clean **carrying** detector
-  (8/8 on `data`, 0/18 on `none`); the leap from rhythm to *voice* is what no
-  label in the set supports. One word changed, no threshold moved. Cost: real
-  voice reads unnamed until whisper confirms, staying visible throughout.
-  See also the 406.125 note under *Do not chase*.
+- [x] DONE (by the wrong-frequency fix) — **V — continuous data reads `voice`.**
+  507.3625 was labelled `voice` on the board. Re-measured after the Nyquist-wrap
+  fix, three captures, and it reads **`digital` every time** — a textbook
+  control-channel clock at 533 Hz, both halves agreeing at 28-30 dB. The board's
+  `voice` was one of the ~5.5% of verdicts computed on the WRONG FREQUENCY.
+  No classifier change was needed or made.
+
+- [ ] **V — real VOICE intermittently reads `digital` on an exact ~8 kHz line.**
+  The opposite defect, found while checking the above. Three captures each:
+
+      161.6850 voice   digital / digital / digital   c1=c2 at 8000-8001 Hz, 21-24 dB
+      162.5500 NOAA    voice   / voice   / digital   c1=c2 at 8001 Hz, 18.8 dB
+      507.4350 data    tone    / tone    / digital   flat 0.019, dyn 0.08
+
+  Two unrelated transmitters landing on the SAME exact frequency points at our
+  chain, not theirs — but synthetic controls do not reproduce it: pure noise
+  through the real channelizer gives 10.7-11.9 dB at random frequencies, and a
+  synthetic FM voice gives 11.5-13.2 dB, all far below the 18 dB gate. So it is
+  real in the signal and not a generic artifact.
+  *Do not fix blind.* This is the same both-halves-agree weakness as the mains
+  hum item below — a stable tone is precisely what agrees across halves.
+  Needs: identify the 8 kHz line before touching `clock()`.
 
 - [ ] **V — idle carriers read `digital`.** `clock()` prove.py:212-220 has no
   mains-hum notch, while `metrics()` notches 60 Hz harmonics 12 lines earlier
