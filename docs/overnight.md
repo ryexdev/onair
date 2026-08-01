@@ -292,3 +292,50 @@ the entire reason for this run.
 
   The bottleneck is no longer measurement. It is ground truth. Twenty channels
   labelled by ear would settle more than another thousand auto-labelled clips.
+
+- **cycle 10 — the whisper labels are probably RIGHT, which reframes cycle 8.**
+
+  Looked at what whisper actually transcribed on the 51 suspect trunked-band
+  channels:
+
+        470.7118  "copy so far"
+        482.9125  "10-4, thank you"
+        482.9875  "Was there a second unit to start?"
+        483.1376  "1-12, family to sh-"
+        472.8392  "I'm gonna read code right now."
+
+  That is real dispatch traffic, not hallucination. So T-band carries a great
+  deal of genuine ANALOG voice alongside its P25, and those whisper labels are
+  most likely correct. The "contaminated library" conclusion from cycle 8 was
+  too quick.
+
+  Which leaves a better explanation for the exam failure: **506.4125 is a
+  trunked channel that carries voice at some moments and data at others.** The
+  operator heard diesel on it; the scanner recorded voice on it minutes later;
+  both are true. Its nearest neighbour at 0.965 was 470.7118, a channel with a
+  genuine dispatch transcript — so the match was correct for that capture.
+
+  ## The real lesson
+
+  A per-CHANNEL label is meaningless on a trunked system. `ear.json` is keyed
+  by frequency and stores one class per channel, which cannot represent
+  "carries both". Every accuracy number tonight inherits that flaw.
+
+  Labels must be per-CAPTURE, tied to the clip, not to the frequency.
+
+  ## For the morning: a listening set
+
+  Eight clips written to `~/Desktop/onair_listen/` with `index.json`:
+
+        506.4125  LIVE   scanner says voice   <- operator's ear said diesel
+        152.2100  LIVE   scanner says voice   <- operator's ear said diesel
+        507.3125  LIVE   scanner says voice   <- P25 clock measured at 4804 Hz
+        470.7118  idle   (whisper heard "copy so far" earlier)
+        472.1128  idle
+        482.8625  idle
+        482.9875  idle
+        483.1375  idle
+
+  The three LIVE ones are the ones worth an ear. If 506.4125 and 152.2100 sound
+  like voice right now and diesel at other times, that confirms the per-capture
+  point and closes out the confusion of the last three cycles.
