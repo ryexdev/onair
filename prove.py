@@ -271,25 +271,53 @@ def kind_of(y, rate=CHAN_RATE):
     # a bursty transmitter (a pager sends, then idles) fails it for the wrong
     # reason: the silent half has no clock to agree with. 929.6125 is digital
     # by ear and was being called plain "data" for exactly this.
+    # ONE CONTIGUOUS RUN, never a splice.
+    #
+    # This used to gather every loud block into one array and diff across the
+    # joins, and — worse — throw the mask away entirely unless it covered half
+    # a second (`idx.sum() > rate // 2`). A bursty transmitter is exactly the
+    # case that fails both: a pager or a trunked radio talks in short bursts,
+    # so the mask rarely reaches 0.5 s, gets discarded, and the clock is then
+    # measured across the bursts AND the silence between them. That smears a
+    # perfectly good symbol clock into nothing.
+    #
+    # Measured live on 152.2100, a VHF pager, four captures: flatness pinned at
+    # 0.18 (a machine, nothing like the 0.5-0.9 of real voice) while both clock
+    # halves sat at 12-13 dB against an 18 dB gate and disagreed wildly on
+    # frequency — 8001 vs 917, 4087 vs 1590. So `digital` was ruled out and it
+    # fell through to the rhythm score, which lands on "voice". Same defect put
+    # P25 trunked channels on the board as voice with no transcript: whisper
+    # cannot transcribe a vocoder, so nothing ever corrected them.
+    #
+    # Take the LONGEST unbroken loud run instead. No joins to diff across, no
+    # silence averaged in, and no minimum-duration rule that fires precisely
+    # when the signal is burstiest.
     k = max(int(rate * 0.1), 256)
     lvl = np.abs(y[:len(y) // k * k]).reshape(-1, k).mean(axis=1)
+    act = d
     if len(lvl) >= 4:
         loud = lvl > (np.median(lvl) + lvl.max()) / 2.0
-        # np.repeat gives (len(y)//k)*k flags, but d has len(y)-1 samples, so
-        # for any capture that is not a whole number of k-sample blocks the
-        # mask is SHORT and numpy raises IndexError on the boolean index. That
-        # exception is swallowed by verify_slice's except clause, so the
-        # channel silently never got a verdict and displayed as a placeholder
-        # for as long as it stayed on air. Pad instead: the trailing partial
-        # block (under 0.1 s) simply counts as not-loud.
-        idx = np.zeros(len(d), bool)
-        rep = np.repeat(loud, k)[:len(d)]
-        idx[:len(rep)] = rep
-        act = d[idx] if idx.sum() > rate // 2 else d
-    else:
-        act = d
+        best_lo = best_hi = 0
+        i = 0
+        while i < len(loud):
+            if loud[i]:
+                j = i
+                while j + 1 < len(loud) and loud[j + 1]:
+                    j += 1
+                if (j + 1 - i) > (best_hi - best_lo):
+                    best_lo, best_hi = i, j + 1
+                i = j + 1
+            else:
+                i += 1
+        run = d[best_lo * k:min(best_hi * k, len(d))]
+        # Only prefer the run if it is long enough for two halves to each hold
+        # a usable number of symbol periods. 0.1 s per half is ~480 cycles at
+        # P25's 4800 Hz and ~320 at FLEX's 3200 — plenty. Below that, fall back
+        # to the whole capture rather than measure a clock on a sliver.
+        if len(run) >= rate // 5:
+            act = run
     h = len(act) // 2
-    if h > rate // 4:
+    if h > rate // 10:
         c1, f1 = clock(act[:h])
         c2, f2 = clock(act[h:])
         if min(c1, c2) > 18.0 and abs(f1 - f2) < 150.0:
