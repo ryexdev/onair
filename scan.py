@@ -915,6 +915,13 @@ def whisper_worker():
             if said_words(txt):
                 with heard_lock:
                     heard[round(freq_hz)] = (time.time(), txt[:120])
+                    # Remember it FOREVER as well. `heard` expires after an
+                    # hour so the board reflects what is on air now, but a
+                    # blank cell then makes "we have never heard words here"
+                    # look identical to "we heard words but not lately", and
+                    # those are completely different claims. This keeps the
+                    # proof.
+                    ever_heard[round(freq_hz)] = (time.time(), txt[:120])
                 print(f"  [heard] {freq_hz/1e6:10.4f}  {txt[:60]}", flush=True)
                 # SELF-LABELLING GROUND TRUTH. Whisper returning real words is
                 # proof this channel is analog voice — a vocoder gives hash, so
@@ -958,6 +965,15 @@ def whisper_worker():
 
 HEARD_TOL_HZ = 4000.0
 tried_nothing = {}            # freq -> (empty listens, when)
+ever_heard = {}               # freq -> (when, text); never expires
+
+
+def ever_heard_recently(freq_hz, tol_hz=HEARD_TOL_HZ):
+    with heard_lock:
+        for f, (when, txt) in ever_heard.items():
+            if abs(f - freq_hz) <= tol_hz:
+                return when, txt
+    return None
 DASH_AFTER = 3                # empty listens before the board says so
 
 
@@ -995,6 +1011,13 @@ def apply_verdicts(res, by_freq, t0, tag=""):
             m["vt"] = now2
             continue
         m["verdict"], m["vt"] = v, now2
+        # How many times this channel has been called voice. Used to aim the
+        # ears: a channel the model keeps insisting is voice, with nothing ever
+        # transcribed on it, is the most valuable thing to point whisper at —
+        # either it produces the first words we have on it, or it produces
+        # dashes, which is evidence the label is wrong. Both beat a tenth
+        # transcript on a channel already known to talk.
+        m["voice_n"] = m.get("voice_n", 0) + 1 if v == "voice" else 0
         if v in CARRYING:
             m["vpos"] = now2
         if v != was:
@@ -1139,6 +1162,7 @@ VERIFY_SECS   = 1.2
 # inside it and is the only place whisper gets enough audio to hear words, so
 # this number is really "how much of the board gets listened to per lap". The
 # machine has the headroom and the operator asked for it loaded up.
+VOICE_STREAK = 3              # judged voice this often with nothing heard yet
 VERIFY_SLICES_PER_LAP = 12    # captures per lap, NOT channels — one capture
                               # judges every confirmed channel inside it
 # A channel that has NEVER been judged is worth far more than re-checking one
@@ -1578,6 +1602,85 @@ def classify(y, rate):
 
 
 
+# --- glance model ------------------------------------------------------------
+# A 16 ms sweep glance is 768 samples at 48 kHz. shape_vector() needs ~43 ms
+# (a 512-point FFT over 4 frames) and returns None on anything shorter, so the
+# main voice model CANNOT see a glance at all. This is the same features at a
+# resolution that fits one: 128-point frames, 2.7 ms each, six per glance.
+GLANCE_NFFT = 128
+GLANCE_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "clips", "glance_model.npz")
+
+
+def _load_glance_model():
+    try:
+        d = np.load(GLANCE_MODEL)
+        return d["X"].astype(np.float32), d["Y"].astype(np.int8)
+    except Exception:
+        return None, None
+
+
+GM_X, GM_Y = _load_glance_model()
+
+
+def glance_vector(y, rate):
+    """Spectral shape of one 16 ms glance, unit length, or None."""
+    d = np.angle(y[1:] * np.conj(y[:-1]))
+    n = (len(d) // GLANCE_NFFT) * GLANCE_NFFT
+    if n < GLANCE_NFFT * 3:
+        return None
+    P = np.abs(np.fft.rfft(d[:n].reshape(-1, GLANCE_NFFT)
+                           * np.hanning(GLANCE_NFFT), axis=1)) ** 2
+    M = 10 * np.log10(P.mean(axis=0) + 1e-20)
+    fr = np.fft.rfftfreq(GLANCE_NFFT, 1 / rate)
+    b = (fr >= 200) & (fr < rate * 0.45)
+    if b.sum() < 8:
+        return None
+    M = M[b] - M[b].mean()
+    nr = np.linalg.norm(M)
+    return (M / nr).astype(np.float32) if nr > 1e-9 else None
+
+
+GLANCE_MAX = 40               # glances kept per channel; a channel seen 40
+                              # times learns little from the 41st, and this
+                              # stops a busy repeater dominating memory
+
+
+def add_glance(m, v):
+    """Running mean of a channel's glances, then classify the POOL.
+
+    Not the individual glances. One 16 ms look is barely better than a coin
+    flip, but the sweep hands us one per channel per lap for free, and glances
+    SPREAD OVER TIME beat the same audio taken in one go. Measured on 769
+    labelled clips across 226 channels, leave-one-channel-out:
+
+        1 x 16 ms                  AUC 0.732
+        5 x 16 ms consecutive          0.738
+        5 x 16 ms spread               0.791
+        1 x 80 ms                      0.752
+
+    Spreading is worth ~2.5x what lengthening the dwell is worth, and a sweep
+    produces spread glances by its nature. So the verdict comes from the
+    accumulated picture, and improves on its own the longer it runs.
+    """
+    if v is None:
+        return
+    n = m.get("g_n", 0)
+    if n >= GLANCE_MAX:
+        return
+    acc = m.get("g_acc")
+    acc = v.astype(np.float64).copy() if acc is None else acc + v
+    m["g_acc"], m["g_n"] = acc, n + 1
+    if GM_X is None or acc.shape[0] != GM_X.shape[1]:
+        return
+    u = acc / (np.linalg.norm(acc) + 1e-12)
+    sims = GM_X @ u.astype(np.float32)
+    j = int(np.argmax(sims))
+    if float(sims[j]) >= VOICE_SIM_MIN:
+        m["glance_voice"] = bool(GM_Y[j])
+        m["glance_sim"] = float(sims[j])
+
+
 class Tracker:
     """Remembers signals across laps. Confirmation and 'is anyone actually
     using it' both live here, because both are questions about TIME."""
@@ -1633,15 +1736,18 @@ class Tracker:
                 # ADS-B is a burst AND a wide lift. Overwriting made the label
                 # flip lap to lap, so collect them instead.
                 m.setdefault("kinds", set()).add(h.get("kind", "narrow"))
+                add_glance(m, h.get("glance"))
                 if not m["announced"] and m["laps"] >= CONFIRM_LAPS \
                         and m["score"] >= SCORE_MIN:
                     m["announced"] = True
                     yield "NEW", m
             else:
+                _g0 = h.pop("glance", None)
                 m = {**h, "kinds": {h.get("kind", "narrow")},
                      "first": now, "last": now, "since": now,
                      "laps": 1, "first_lap": lap, "last_lap": lap,
                      "announced": False}
+                add_glance(m, _g0)
                 self.t.append(m)
                 self._index(m)
 
@@ -1853,8 +1959,12 @@ def apply_heard(rows):
         txt = heard_recently(r["freq"] * 1e6)
         if txt:
             r["verdict"], r["said"] = "voice", txt
-        elif tried_recently(r["freq"] * 1e6):
-            r["said"] = "\u2014"        # listened, no words. Not the same as untried.
+        else:
+            was = ever_heard_recently(r["freq"] * 1e6)
+            if was:
+                r["said"], r["said_age"] = was[1], time.time() - was[0]
+            elif tried_recently(r["freq"] * 1e6):
+                r["said"] = "\u2014"    # listened, no words. Not the same as untried.
 
 
 def attach_bookmarks(rows):
@@ -1927,7 +2037,19 @@ def publish(tr, lap, t0, bands):
                      "duty": round(d, 3),
                      "pattern": pattern(m, lap),
                      "tag": label_for(key / 1e6),
-                     "verdict": m.get("verdict", "?"),
+                     # The pooled-glance answer, used ONLY where the slow
+                     # verify pass has never reached. Verify sees 12 slices a
+                     # lap against a board of thousands, so most rows would
+                     # otherwise sit "?" forever; the sweep touches every
+                     # channel every lap and now keeps what it hears.
+                     "verdict": (m.get("verdict")
+                                 or ("voice" if m.get("glance_voice") is True
+                                     else ("other" if m.get("glance_voice")
+                                           is False else "?"))),
+                     "glances": m.get("g_n", 0),
+                     "glance_sim": (round(m["glance_sim"], 3)
+                                    if m.get("glance_sim") is not None
+                                    else None),
                      "kind": "+".join(sorted(m.get("kinds",
                                                     {m.get("kind","narrow")})))})
     apply_heard(rows)
@@ -2394,8 +2516,10 @@ async function tick(){
        '<td class=k>'+(r.kind==='narrow'?'':r.kind)+'</td>'+
        '<td class="n age nw">'+(r.on?'LIVE':r.age==null
           ?'<span class=nh>not heard</span>':ago(Math.round(r.age/5)*5))+'</td>'+
-       '<td class=hd'+(r.said==='\u2014'?' style="color:#4a5058"':'')+'>'+
-         (r.said?esc(r.said):'')+'</td>'+
+       '<td class=hd'+((r.said==='\u2014'||r.said_age)?' style="color:#5a6470"':'')+'>'+
+         (r.said?esc(r.said):'')+
+         (r.said_age?'<span style="color:#4a5058"> \u00b7 '+ago(Math.round(r.said_age))+' ago</span>':'')+
+         '</td>'+
        '<td class=nt>'+(r.fav
          ?'<input class=note data-f="'+r.freq.toFixed(4)+'" placeholder="add a note\u2026" value="'+
           (r.note||'').replace(/"/g,'&quot;')+'">'
@@ -2884,13 +3008,31 @@ def main(argv):
                                     continue
                                 yb = _chanl(iq, RATE, off_f, LISTEN_RATE,
                                             pre=pre)
+                                st = surface_stats(yb, LISTEN_RATE)
+                                if not (st and is_really_live(st[0], st[2])):
+                                    continue     # nothing on it this lap
+                                # KEEP THE GLANCE. This used to be thrown away
+                                # after a yes/no. One 16 ms look is weak, but
+                                # the sweep hands us one per channel per lap
+                                # for free, and glances SPREAD OVER TIME are
+                                # worth more than the same audio taken in one
+                                # go — measured on 769 labelled clips over 226
+                                # channels, leave-one-channel-out:
+                                #
+                                #     1 x 16 ms                  AUC 0.732
+                                #     5 x 16 ms consecutive          0.738
+                                #     5 x 16 ms spread               0.791
+                                #     1 x 80 ms                      0.752
+                                #
+                                # Spreading is worth ~2.5x what lengthening the
+                                # dwell is worth, and a sweep produces spread
+                                # glances by its nature. So accumulate.
+                                h["glance"] = glance_vector(yb, LISTEN_RATE)
                                 if shape_is_voice(yb, LISTEN_RATE) is True:
-                                    st = surface_stats(yb, LISTEN_RATE)
-                                    if st and is_really_live(st[0], st[2]):
-                                        h["looks_voice"] = True
-                                        with _voice_lock:
-                                            wants_ear[round(h["freq"])] = \
-                                                time.time()
+                                    h["looks_voice"] = True
+                                    with _voice_lock:
+                                        wants_ear[round(h["freq"])] = \
+                                            time.time()
                         except Exception:
                             pass
                     for h in hits:
@@ -2994,7 +3136,20 @@ def main(argv):
                     # where those happen. So the model decides where the ears
                     # go, rather than strength alone.
                     ear = 6.0 if any(wants_ear_recently(m["freq"]) for m in ms) else 1.0
-                    return (strongest ** 2) * waited * (len(ms) ** 0.5) * ear
+                    # BREADTH BEFORE DEPTH. A first transcript on a channel we
+                    # have never heard words from is worth far more than an
+                    # updated one on a channel already proven to talk. So a
+                    # slice holding a channel that has been judged voice
+                    # VOICE_STREAK times and still has no transcript jumps the
+                    # queue, and a slice whose channels have all been heard
+                    # recently gets pushed back.
+                    unheard = any(m.get("voice_n", 0) >= VOICE_STREAK
+                                  and not ever_heard_recently(m["freq"])
+                                  for m in ms)
+                    known = all(ever_heard_recently(m["freq"]) for m in ms)
+                    aim = 8.0 if unheard else (0.35 if known else 1.0)
+                    return ((strongest ** 2) * waited * (len(ms) ** 0.5)
+                            * ear * aim)
                 order = sorted(groups.items(), key=worth, reverse=True)
                 for center, members in order[:VERIFY_SLICES_PER_LAP]:
                     by_freq = {m["freq"]: m for m in members}
